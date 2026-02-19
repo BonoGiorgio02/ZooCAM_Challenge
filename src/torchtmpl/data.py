@@ -10,9 +10,22 @@ import torch.nn as nn
 import torch.utils.data
 import torchvision
 from torchvision import transforms
+from torchvision.datasets import ImageFolder
+import torchvision.transforms.functional as F
 
+import numpy as np
 import matplotlib.pyplot as plt
 
+
+def show(imgs):
+    if not isinstance(imgs, list):
+        imgs = [imgs]
+    fig, axs = plt.subplots(ncols=len(imgs), squeeze=False)
+    for i, img in enumerate(imgs):
+        img = img.detach()
+        img = F.to_pil_image(img)
+        axs[0, i].imshow(np.asarray(img))
+        axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
 
 def show_image(X):
     num_c = X.shape[0]
