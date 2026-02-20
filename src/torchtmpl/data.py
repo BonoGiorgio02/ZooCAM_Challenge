@@ -45,22 +45,27 @@ def get_dataloaders(data_config, use_cuda):
         [transforms.Grayscale(), transforms.Resize((128, 128)), transforms.ToTensor()]
     )
 
-    base_dataset = torchvision.datasets.Caltech101(
+    root_train_dataset = ImageFolder(
         root=data_config["trainpath"],
-        download=True,
+        transform=input_transform,
+    )
+    
+    test_dataset = ImageFolder(
+        root = data_config["testpath"],
         transform=input_transform,
     )
 
-    logging.info(f"  - I loaded {len(base_dataset)} samples")
+    logging.info(f"  - I loaded {len(root_train_dataset)} train samples")
+    logging.info(f"  - I loaded {len(test_dataset)} test samples")
 
-    indices = list(range(len(base_dataset)))
+    indices = list(range(len(root_train_dataset)))
     random.shuffle(indices)
-    num_valid = int(valid_ratio * len(base_dataset))
+    num_valid = int(valid_ratio * len(root_train_dataset))
     train_indices = indices[num_valid:]
     valid_indices = indices[:num_valid]
 
-    train_dataset = torch.utils.data.Subset(base_dataset, train_indices)
-    valid_dataset = torch.utils.data.Subset(base_dataset, valid_indices)
+    train_dataset = torch.utils.data.Subset(root_train_dataset, train_indices)
+    valid_dataset = torch.utils.data.Subset(root_train_dataset, valid_indices)
 
     # Build the dataloaders
     train_loader = torch.utils.data.DataLoader(
@@ -78,8 +83,15 @@ def get_dataloaders(data_config, use_cuda):
         num_workers=num_workers,
         pin_memory=use_cuda,
     )
+    
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=use_cuda,
+    )
 
-    num_classes = len(base_dataset.categories)
-    input_size = tuple(base_dataset[0][0].shape)
+    num_classes = len(root_train_dataset.categories)
+    input_size = tuple(root_train_dataset[0][0].shape)
 
-    return train_loader, valid_loader, input_size, num_classes
+    return train_loader, valid_loader, test_loader, input_size, num_classes

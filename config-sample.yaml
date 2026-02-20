@@ -1,25 +1,27 @@
 data:
-  trainpath: '/opt/Datasets/'
-  # testpath: '/dummy/path/to/test'
+  trainpath: '/mounts/datasets/datasets/2025-ZooCamChallenge/train'
+  testpath: '/mounts/datasets/datasets/2025-ZooCamChallenge/test'
   batch_size: 256
   num_workers: 4
   valid_ratio: 0.2
 
 optim:
-  algo: SGD
+  algo: Adam
   params:
-    lr: 0.01
+    lr: 0.0001
 
 nepochs: 20
 loss: "CrossEntropyLoss"
 
 logging:
-  # wandb: 
-  #   project: sample_project
-  #   entity: sample_entity
-  logdir: "./logs"  # Better to provide the fullpath, especially on the cluster
-# model:
-#   class: Linear
+  logdir: "./logs"
+
 model:
   class: VanillaCNN
-  num_layers : 4
+  num_layers: 4
+
+test:
+  checkpoint: "./logs/VanillaCNN_0/best_model.pt" 
+
+output:
+  submission_path: "./submission.csv"

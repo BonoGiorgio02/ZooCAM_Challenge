@@ -8,9 +8,12 @@ import pathlib
 
 # External imports
 import yaml
-import wandb
+#import wandb
 import torch
 import torchinfo.torchinfo as torchinfo
+
+import csv
+from tqdm import tqdm
 
 # Local imports
 from . import data
@@ -23,20 +26,20 @@ def train(config):
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda") if use_cuda else torch.device("cpu")
 
-    if "wandb" in config["logging"]:
-        wandb_config = config["logging"]["wandb"]
-        wandb.init(project=wandb_config["project"], entity=wandb_config["entity"])
-        wandb_log = wandb.log
-        wandb_log(config)
-        logging.info(f"Will be recording in wandb run name : {wandb.run.name}")
-    else:
-        wandb_log = None
+    # if "wandb" in config["logging"]:
+    #     wandb_config = config["logging"]["wandb"]
+    #     wandb.init(project=wandb_config["project"], entity=wandb_config["entity"])
+    #     wandb_log = wandb.log
+    #     wandb_log(config)
+    #     logging.info(f"Will be recording in wandb run name : {wandb.run.name}")
+    # else:
+    #     wandb_log = None
 
     # Build the dataloaders
     logging.info("= Building the dataloaders")
     data_config = config["data"]
 
-    train_loader, valid_loader, input_size, num_classes = data.get_dataloaders(
+    train_loader, valid_loader, test_loader, input_size, num_classes = data.get_dataloaders(
         data_config, use_cuda
     )
 
@@ -77,7 +80,7 @@ def train(config):
         + " ".join(sys.argv)
         + "\n\n"
         + f" Config : {config} \n\n"
-        + (f" Wandb run name : {wandb.run.name}\n\n" if wandb_log is not None else "")
+        # + (f" Wandb run name : {wandb.run.name}\n\n" if wandb_log is not None else "")
         + "## Summary of the model architecture\n"
         + f"{torchinfo.summary(model, input_size=input_size)}\n\n"
         + "## Loss\n\n"
@@ -89,8 +92,8 @@ def train(config):
     with open(logdir / "summary.txt", "w") as f:
         f.write(summary_text)
     logging.info(summary_text)
-    if wandb_log is not None:
-        wandb.log({"summary": summary_text})
+    # if wandb_log is not None:
+    #     wandb.log({"summary": summary_text})
 
     # Define the early stopping callback
     model_checkpoint = utils.ModelCheckpoint(
@@ -117,13 +120,73 @@ def train(config):
 
         # Update the dashboard
         metrics = {"train_CE": train_loss, "test_CE": test_loss}
-        if wandb_log is not None:
-            logging.info("Logging on wandb")
-            wandb_log(metrics)
+        # if wandb_log is not None:
+        #     logging.info("Logging on wandb")
+        #     wandb_log(metrics)
 
 
 def test(config):
-    raise NotImplementedError
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda") if use_cuda else torch.device("cpu")
+
+    logging.info("= Building the dataloaders")
+    data_config = config["data"]
+    train_loader, valid_loader, test_loader, input_size, num_classes = data.get_dataloaders(
+        data_config, use_cuda
+    )
+
+    logging.info("= Model")
+    model_config = config["model"]
+    model = models.build_model(model_config, input_size, num_classes).to(device)
+    model.eval()
+
+    ckpt_path = None
+    if "test" in config and "checkpoint" in config["test"]:
+        ckpt_path = config["test"]["checkpoint"]
+    else:
+        ckpt_path = os.path.join(config["logging"]["logdir"], "best_model.pt")
+
+    logging.info(f"Loading checkpoint: {ckpt_path}")
+    state = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(state)
+
+    all_imgnames = []
+    all_labels = []
+
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc="Inference on test"):
+            if not (isinstance(batch, (tuple, list)) and len(batch) == 2):
+                raise ValueError(
+                    "test_loader must return (images, imgname/filename). "
+                    "Update the test dataset to include filename."
+                )
+
+            x, imgnames = batch
+            x = x.to(device)
+
+            logits = model(x)
+            preds = torch.argmax(logits, dim=1)
+
+            preds = preds.detach().cpu().tolist()
+
+            if torch.is_tensor(imgnames):
+                imgnames = imgnames.detach().cpu().tolist()
+
+            all_imgnames.extend(list(imgnames))
+            all_labels.extend(preds)
+
+    out_path = config.get("output", {}).get("submission_path", "submission.csv")
+    logging.info(f"Writing submission to: {out_path}")
+
+    with open(out_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["imgname", "label"])
+        for name, lab in zip(all_imgnames, all_labels):
+            name = os.path.basename(str(name))
+            writer.writerow([name, int(lab)])
+
+    logging.info("Done.")
+
 
 
 if __name__ == "__main__":
