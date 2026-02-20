@@ -3,6 +3,7 @@
 # Standard imports
 import logging
 import random
+from pathlib import Path
 
 # External imports
 import torch
@@ -11,6 +12,7 @@ import torch.utils.data
 import torchvision
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
+from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
 import torchvision.transforms.functional as F
 
 import numpy as np
@@ -34,6 +36,30 @@ def show_image(X):
     plt.show()
 
 
+class InferenceImageDataset(torch.utils.data.Dataset):
+    """Dataset for unlabeled inference that returns (image_tensor, filename)."""
+
+    def __init__(self, root, transform=None):
+        self.root = Path(root)
+        self.transform = transform
+        self.samples = sorted(
+            p for p in self.root.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTENSIONS
+        )
+
+        if len(self.samples) == 0:
+            raise ValueError(f"No image found under test path: {self.root}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        path = self.samples[idx]
+        img = default_loader(str(path))
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, path.name
+
+
 def get_dataloaders(data_config, use_cuda):
     valid_ratio = data_config["valid_ratio"]
     batch_size = data_config["batch_size"]
@@ -50,8 +76,8 @@ def get_dataloaders(data_config, use_cuda):
         transform=input_transform,
     )
     
-    test_dataset = ImageFolder(
-        root = data_config["testpath"],
+    test_dataset = InferenceImageDataset(
+        root=data_config["testpath"],
         transform=input_transform,
     )
 
@@ -86,12 +112,13 @@ def get_dataloaders(data_config, use_cuda):
     
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=use_cuda,
     )
 
-    num_classes = len(root_train_dataset.categories)
+    num_classes = len(root_train_dataset.classes)
     input_size = tuple(root_train_dataset[0][0].shape)
 
     return train_loader, valid_loader, test_loader, input_size, num_classes
