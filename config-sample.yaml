@@ -1,12 +1,19 @@
 data:
   trainpath: '/mounts/datasets/datasets/2025-ZooCamChallenge/train'
   testpath: '/mounts/datasets/datasets/2025-ZooCamChallenge/test'
-  batch_size: 64
-  num_workers: 4
-  valid_ratio: 0.2
+  batch_size: 256
+  num_workers: 8
+  valid_ratio: 0.1
   seed: 42
+
+  img_size: 128
+  to_rgb: true
+  pad_fill: 255
+
   analysis:
+    compute_analysis: false
     out_dir: './analysis'
+    compute_percentiles: true
 
 optim:
   algo: Adam
