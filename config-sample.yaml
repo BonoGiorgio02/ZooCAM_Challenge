@@ -4,6 +4,9 @@ data:
   batch_size: 64
   num_workers: 4
   valid_ratio: 0.2
+  seed: 42
+  analysis:
+    out_dir: './analysis'
 
 optim:
   algo: Adam
@@ -21,7 +24,7 @@ model:
   num_layers: 4
 
 test:
-  checkpoint: "./logs/VanillaCNN_0/best_model.pt" 
+  checkpoint: "./logs/VanillaCNN_1/best_model.pt" 
 
 output:
   submission_path: "./submission.csv"

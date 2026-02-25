@@ -1,23 +1,27 @@
 # coding: utf-8
 
 # Standard imports
-import logging
+import os
 import random
+import logging
 from pathlib import Path
 
 # External imports
 import torch
+import torchvision
 import torch.nn as nn
 import torch.utils.data
-import torchvision
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
-from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
 import torchvision.transforms.functional as F
+from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
 
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
 
+# Local imports
+from . import analysis
 
 def show(imgs):
     if not isinstance(imgs, list):
@@ -59,39 +63,75 @@ class InferenceImageDataset(torch.utils.data.Dataset):
             img = self.transform(img)
         return img, path.name
 
-
-def get_dataloaders(data_config, use_cuda):
-    valid_ratio = data_config["valid_ratio"]
-    batch_size = data_config["batch_size"]
-    num_workers = data_config["num_workers"]
-
+def build_datasets(data_config):
+    """
+    Build datasets, this is useful because analysis can run right after dataset creation.
+    Returns:
+      train_base: ImageFolder (train, with transform=None by default)
+      test_ds: InferenceImageDataset (test/imgs, returns filename)
+    """
+    
     logging.info("  - Dataset creation")
-
-    input_transform = transforms.Compose(
-        [transforms.Grayscale(), transforms.Resize((128, 128)), transforms.ToTensor()]
-    )
-
+    
     root_train_dataset = ImageFolder(
         root=data_config["trainpath"],
-        transform=input_transform,
+        transform=None,
     )
     
-    test_dataset = InferenceImageDataset(
+    root_test_dataset = InferenceImageDataset(
         root=data_config["testpath"],
-        transform=input_transform,
+        transform=None,
+    )
+    
+    logging.info(f"  - Loaded {len(root_train_dataset)} train samples")
+    logging.info(f"  - Loaded {len(root_test_dataset)} test samples")
+    
+    return root_train_dataset, root_test_dataset
+    
+
+def get_dataloaders(data_config, use_cuda):
+    valid_ratio = data_config.get("valid_ratio", 0.1)
+    batch_size = data_config.get("batch_size", 128)
+    num_workers = data_config.get("num_workers", 4)
+    seed = data_config.get("seed", 0)
+    
+    # Build base datasets without transforms
+    train_base, test_dataset = build_datasets(data_config)
+    
+    # --- Analysis step (one-shot)
+    analysis_cfg = data_config.get("analysis", {})  # optionally nested under data
+    sample_size = analysis_cfg.get("sample_size", 200000)
+    save_dir = analysis_cfg.get("out_dir", "./analysis")
+
+    counts_df, report = analysis.analyze_imagefolder(
+        train_base,
+        sample_size=sample_size,
+        seed=seed,
+        out_dir=save_dir,
     )
 
-    logging.info(f"  - I loaded {len(root_train_dataset)} train samples")
-    logging.info(f"  - I loaded {len(test_dataset)} test samples")
+    # TODO: Improve data augmentation with other v2 transforms
+    # Baseline transforms 
+    input_transform = transforms.Compose([
+        transforms.Grayscale(),
+        transforms.Resize((128, 128)),
+        transforms.ToTensor()
+    ])
 
-    indices = list(range(len(root_train_dataset)))
-    random.shuffle(indices)
-    num_valid = int(valid_ratio * len(root_train_dataset))
-    train_indices = indices[num_valid:]
-    valid_indices = indices[:num_valid]
-
-    train_dataset = torch.utils.data.Subset(root_train_dataset, train_indices)
-    valid_dataset = torch.utils.data.Subset(root_train_dataset, valid_indices)
+    labels = np.array([y for _, y in train_base.samples])
+    indices = np.arange(len(labels))
+    
+    train_full = ImageFolder(root=data_config["trainpath"], transform=input_transform)
+    
+    train_indices, valid_indices = train_test_split(
+        indices,
+        test_size=valid_ratio,
+        stratify=labels,
+        random_state=seed,
+    )
+    
+    train_dataset = torch.utils.data.Subset(train_full, train_indices)
+    valid_dataset = torch.utils.data.Subset(train_full, valid_indices)
 
     # Build the dataloaders
     train_loader = torch.utils.data.DataLoader(
@@ -118,7 +158,7 @@ def get_dataloaders(data_config, use_cuda):
         pin_memory=use_cuda,
     )
 
-    num_classes = len(root_train_dataset.classes)
-    input_size = tuple(root_train_dataset[0][0].shape)
+    num_classes = len(train_base.classes)
+    input_size = tuple(train_full[0][0].shape)
 
     return train_loader, valid_loader, test_loader, input_size, num_classes
