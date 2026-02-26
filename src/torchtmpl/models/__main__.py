@@ -33,6 +33,26 @@ def test_cnn():
     print(f"Output tensor of size : {output.shape}")
 
 
+def test_resnet():
+    cfg = {
+        "class": "ResNetModel",
+        "stem_channels": 64,
+        "stage_channels": [64, 128, 256, 512],
+        "blocks_per_stage": [2, 2, 2, 2],
+    }
+    input_size = (1, 128, 128)
+    batch_size = 16
+    num_classes = 18
+    model = build_model(cfg, input_size, num_classes)
+
+    input_tensor = torch.randn(batch_size, *input_size)
+    output = model(input_tensor)
+    expected_output_size = (batch_size, num_classes)
+    assert expected_output_size == output.shape
+    print(f"Output tensor of size : {output.shape}")
+
+
 if __name__ == "__main__":
     test_linear()
     test_cnn()
+    test_resnet()
