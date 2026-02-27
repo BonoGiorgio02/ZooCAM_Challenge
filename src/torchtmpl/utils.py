@@ -82,7 +82,8 @@ def train(model, loader, f_loss, optimizer, device, dynamic_display=True):
 
     total_loss = 0
     num_samples = 0
-    for i, (inputs, targets) in (pbar := tqdm.tqdm(enumerate(loader))):
+    pbar = tqdm.tqdm(loader, desc="Train", leave=False)
+    for i, (inputs, targets) in pbar:
 
         inputs, targets = inputs.to(device), targets.to(device)
 
@@ -100,7 +101,9 @@ def train(model, loader, f_loss, optimizer, device, dynamic_display=True):
         # We here consider the loss is batch normalized
         total_loss += inputs.shape[0] * loss.item()
         num_samples += inputs.shape[0]
-        pbar.set_description(f"Train loss : {total_loss/num_samples:.2f}")
+        # pbar.set_description(f"Train loss : {total_loss/num_samples:.2f}")
+        lr = optimizer.param_groups[0]["lr"]
+        pbar.set_postfix(loss=f"{total_loss/num_samples:.4f}", lr=f"{lr:.2e}")
 
     return total_loss / num_samples
 
@@ -123,7 +126,10 @@ def test(model, loader, f_loss, device):
 
     total_loss = 0
     num_samples = 0
-    for (inputs, targets) in loader:
+    
+    pbar = tqdm.tqdm(loader, desc="Val", leave=False)
+    
+    for (inputs, targets) in pbar:
 
         inputs, targets = inputs.to(device), targets.to(device)
 
@@ -136,5 +142,7 @@ def test(model, loader, f_loss, device):
         # We here consider the loss is batch normalized
         total_loss += inputs.shape[0] * loss.item()
         num_samples += inputs.shape[0]
+        
+        pbar.set_postfix(loss=f"{total_loss/num_samples:.4f}")
 
     return total_loss / num_samples

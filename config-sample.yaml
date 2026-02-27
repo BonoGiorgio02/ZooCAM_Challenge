@@ -20,6 +20,12 @@ optim:
   params:
     lr: 0.0001
 
+scheduler:
+  algo: CosineAnnealingLR
+  params:
+    T_max: 20 
+    eta_min: 1.0e-6
+
 nepochs: 20
 loss: "CrossEntropyLoss"
 
@@ -29,6 +35,8 @@ logging:
 model:
   class: VanillaCNN
   num_layers: 4
+  head_hidden: 256
+  dropout: 0.2
 
 test:
   checkpoint: "./logs/VanillaCNN_1/best_model.pt" 

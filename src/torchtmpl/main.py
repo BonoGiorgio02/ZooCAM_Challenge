@@ -57,6 +57,11 @@ def train(config):
     logging.info("= Optimizer")
     optim_config = config["optim"]
     optimizer = optim.get_optimizer(optim_config, model.parameters())
+    
+    # Build the scheduler (optional)
+    logging.info("= Scheduler")
+    sched_cfg = config.get("scheduler", None)
+    scheduler = optim.get_scheduler(sched_cfg, optimizer)
 
     # Build the callbacks
     logging_config = config["logging"]
@@ -106,6 +111,16 @@ def train(config):
 
         # Test
         test_loss = utils.test(model, valid_loader, loss, device)
+        
+        # Step the scheduler
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(test_loss)  # plateau needs a metric
+            else:
+                scheduler.step()
+                
+        current_lr = optimizer.param_groups[0]["lr"]
+        logging.info(f"LR: {current_lr:.2e}")
 
         updated = model_checkpoint.update(test_loss)
         logging.info(

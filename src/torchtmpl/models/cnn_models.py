@@ -35,6 +35,9 @@ class VanillaCNN(nn.Module):
     def __init__(self, cfg, input_size, num_classes):
         super().__init__()
         
+        hidden = cfg.get("head_hidden", 256)
+        drop_p = cfg.get("dropout", 0.2)
+        
         layers = []
         cin = input_size[0]
         cout = 16
@@ -47,7 +50,15 @@ class VanillaCNN(nn.Module):
             
         layers.append(nn.AdaptiveAvgPool2d(1))
         layers.append(nn.Flatten(start_dim=1))
-        layers.append(nn.Linear(cout, num_classes))
+        layers.append(nn.Linear(cout, hidden))
+        layers.append(nn.BatchNorm1d(hidden))
+        layers.append(nn.ReLU())
+        layers.append(nn.Dropout(p=drop_p))
+        layers.append(nn.Linear(hidden, hidden//2))
+        layers.append(nn.BatchNorm1d(hidden//2))
+        layers.append(nn.ReLU())
+        layers.append(nn.Dropout(p=drop_p))
+        layers.append(nn.Linear(hidden//2, num_classes))
         
         self.model = nn.Sequential(*layers)
         

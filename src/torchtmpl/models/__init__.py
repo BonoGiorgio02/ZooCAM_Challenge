@@ -7,6 +7,7 @@ import torch
 from .base_models import *
 from .cnn_models import *
 from .resnet_model import *
+from .ResNet_models import *
 
 
 def build_model(cfg, input_size, num_classes):
