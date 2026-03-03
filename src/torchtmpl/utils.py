@@ -30,7 +30,7 @@ def generate_unique_logpath(logdir, raw_run_name):
 
 class ModelCheckpoint(object):
     """
-    Early stopping callback
+    Early stopping callback that saves a full training checkpoint.
     """
 
     def __init__(
@@ -38,9 +38,13 @@ class ModelCheckpoint(object):
         model: torch.nn.Module,
         savepath,
         min_is_best: bool = True,
+        optimizer=None,
+        scheduler=None,
     ) -> None:
         self.model = model
         self.savepath = savepath
+        self.optimizer = optimizer
+        self.scheduler = scheduler
         self.best_score = None
         if min_is_best:
             self.is_better = self.lower_is_better
@@ -53,15 +57,28 @@ class ModelCheckpoint(object):
     def higher_is_better(self, score):
         return self.best_score is None or score > self.best_score
 
-    def update(self, score):
+    def update(self, score, epoch: int):
+        """
+        Save checkpoint if score improved.
+        """
         if self.is_better(score):
-            torch.save(self.model.state_dict(), self.savepath)
+            ckpt = {
+                "epoch": epoch,
+                "best_score": score,
+                "model": self.model.state_dict(),
+            }
+            if self.optimizer is not None:
+                ckpt["optimizer"] = self.optimizer.state_dict()
+            if self.scheduler is not None:
+                ckpt["scheduler"] = self.scheduler.state_dict()
+
+            torch.save(ckpt, self.savepath)
             self.best_score = score
             return True
         return False
 
 
-def train(model, loader, f_loss, optimizer, device, dynamic_display=True):
+def train(model, loader, f_loss, optimizer, device, dynamic_display=True, wandb_log=None):
     """
     Train a model for one epoch, iterating over the loader
     using the f_loss to compute the loss and the optimizer
@@ -82,7 +99,9 @@ def train(model, loader, f_loss, optimizer, device, dynamic_display=True):
 
     total_loss = 0
     num_samples = 0
+    
     pbar = tqdm.tqdm(loader, desc="Train", leave=False)
+    
     for i, (inputs, targets) in pbar:
 
         inputs, targets = inputs.to(device), targets.to(device)
@@ -101,9 +120,13 @@ def train(model, loader, f_loss, optimizer, device, dynamic_display=True):
         # We here consider the loss is batch normalized
         total_loss += inputs.shape[0] * loss.item()
         num_samples += inputs.shape[0]
+        
         # pbar.set_description(f"Train loss : {total_loss/num_samples:.2f}")
         lr = optimizer.param_groups[0]["lr"]
         pbar.set_postfix(loss=f"{total_loss/num_samples:.4f}", lr=f"{lr:.2e}")
+        
+        if wandb_log is not None and (i % 100) == 0:
+            wandb_log({"train_loss_batch": float(loss.item()), "batch": i})
 
     return total_loss / num_samples
 

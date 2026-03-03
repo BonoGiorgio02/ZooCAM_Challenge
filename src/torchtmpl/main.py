@@ -8,7 +8,7 @@ import pathlib
 
 # External imports
 import yaml
-#import wandb
+import wandb
 import torch
 import torchinfo.torchinfo as torchinfo
 
@@ -26,14 +26,18 @@ def train(config):
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda") if use_cuda else torch.device("cpu")
 
-    # if "wandb" in config["logging"]:
-    #     wandb_config = config["logging"]["wandb"]
-    #     wandb.init(project=wandb_config["project"], entity=wandb_config["entity"])
-    #     wandb_log = wandb.log
-    #     wandb_log(config)
-    #     logging.info(f"Will be recording in wandb run name : {wandb.run.name}")
-    # else:
-    #     wandb_log = None
+    wandb_log = None
+    if "wandb" in config.get("logging", {}):
+        wandb_config = config["logging"]["wandb"]
+        wandb.init(
+            project=wandb_config.get("project", "ZooCamChallenge"),
+            entity=wandb_config.get("entity", None),
+            config=config,
+        )
+        wandb_log = wandb.log
+        logging.info(f"Will be recording in wandb run name : {wandb.run.name}")
+    else:
+        wandb_log = None
 
     # Build the dataloaders
     logging.info("= Building the dataloaders")
@@ -62,6 +66,43 @@ def train(config):
     logging.info("= Scheduler")
     sched_cfg = config.get("scheduler", None)
     scheduler = optim.get_scheduler(sched_cfg, optimizer)
+    
+    train_cfg = config.get("train", {})
+    resume = bool(train_cfg.get("resume", False))
+    ckpt_path = train_cfg.get("checkpoint", "")
+
+    start_epoch = 0
+    resumed_best = None
+
+    if resume:
+        if ckpt_path is None or ckpt_path == "":
+            raise ValueError("train.resume is True but train.checkpoint is empty.")
+        if not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+        logging.info(f"  - Resuming from checkpoint: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device)
+
+        # New style checkpoint: dict with model/optimizer/scheduler
+        if isinstance(ckpt, dict) and "model" in ckpt:
+            model.load_state_dict(ckpt["model"], strict=True)
+
+            if "optimizer" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer"])
+            if scheduler is not None and "scheduler" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler"])
+
+            start_epoch = int(ckpt.get("epoch", -1)) + 1
+            resumed_best = ckpt.get("best_score", None)
+        else:
+            # Old style: ckpt is directly model weights
+            model.load_state_dict(ckpt, strict=True)
+            start_epoch = 0
+            resumed_best = None
+
+        logging.info(f"Resumed start_epoch={start_epoch}")
+    else:
+        logging.info("  - Training from scratch (no checkpoint loaded).")
 
     # Build the callbacks
     logging_config = config["logging"]
@@ -85,7 +126,7 @@ def train(config):
         + " ".join(sys.argv)
         + "\n\n"
         + f" Config : {config} \n\n"
-        # + (f" Wandb run name : {wandb.run.name}\n\n" if wandb_log is not None else "")
+        + (f" Wandb run name : {wandb.run.name}\n\n" if wandb_log is not None else "")
         + "## Summary of the model architecture\n"
         + f"{torchinfo.summary(model, input_size=input_size)}\n\n"
         + "## Loss\n\n"
@@ -97,17 +138,25 @@ def train(config):
     with open(logdir / "summary.txt", "w") as f:
         f.write(summary_text)
     logging.info(summary_text)
-    # if wandb_log is not None:
-    #     wandb.log({"summary": summary_text})
+    if wandb_log is not None:
+        wandb.log({"summary": summary_text})
 
     # Define the early stopping callback
     model_checkpoint = utils.ModelCheckpoint(
-        model, str(logdir / "best_model.pt"), min_is_best=True
+        model,
+        str(logdir / "best_model.pt"),
+        min_is_best=True,
+        optimizer=optimizer,
+        scheduler=scheduler,
     )
+    
+    if resume and resumed_best is not None:
+        model_checkpoint.best_score = resumed_best
+        logging.info(f"Restored best_score={resumed_best}")
 
-    for e in range(config["nepochs"]):
+    for e in range(start_epoch, config["nepochs"]):
         # Train 1 epoch
-        train_loss = utils.train(model, train_loader, loss, optimizer, device)
+        train_loss = utils.train(model, train_loader, loss, optimizer, device, wandb_log=wandb_log)
 
         # Test
         test_loss = utils.test(model, valid_loader, loss, device)
@@ -122,7 +171,7 @@ def train(config):
         current_lr = optimizer.param_groups[0]["lr"]
         logging.info(f"LR: {current_lr:.2e}")
 
-        updated = model_checkpoint.update(test_loss)
+        updated = model_checkpoint.update(test_loss, epoch=e)
         logging.info(
             "[%d/%d] Test loss : %.3f %s"
             % (
@@ -134,10 +183,18 @@ def train(config):
         )
 
         # Update the dashboard
-        metrics = {"train_CE": train_loss, "test_CE": test_loss}
-        # if wandb_log is not None:
-        #     logging.info("Logging on wandb")
-        #     wandb_log(metrics)
+        metrics = {
+        "epoch": e,
+        "train_loss": train_loss,
+        "val_loss": test_loss,
+        "lr": current_lr,
+        }
+        if wandb_log is not None:
+            logging.info("Logging on wandb")
+            wandb_log(metrics)
+    
+    if wandb_log is not None:
+        wandb.finish()
 
 
 def test(config):

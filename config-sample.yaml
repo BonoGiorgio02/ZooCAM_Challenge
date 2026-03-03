@@ -31,12 +31,21 @@ loss: "CrossEntropyLoss"
 
 logging:
   logdir: "./logs"
+  wandb:
+    project: "ZooCamChallenge"
+    entity: null
 
 model:
   class: VanillaCNN
   num_layers: 4
   head_hidden: 256
   dropout: 0.2
+
+train:
+  resume: false
+  checkpoint: ""
+  # resume: true
+  # checkpoint: "./logs/VanillaCNN_0/best_model.pt"
 
 test:
   checkpoint: "./logs/VanillaCNN_1/best_model.pt" 
