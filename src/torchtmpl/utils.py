@@ -100,7 +100,7 @@ def train(model, loader, f_loss, optimizer, device, dynamic_display=True, wandb_
     total_loss = 0
     num_samples = 0
     
-    pbar = tqdm.tqdm(loader, desc="Train", leave=False)
+    pbar = tqdm.tqdm(enumerate(loader), desc="Train", leave=False)
     
     for i, (inputs, targets) in pbar:
 
@@ -150,9 +150,9 @@ def test(model, loader, f_loss, device):
     total_loss = 0
     num_samples = 0
     
-    pbar = tqdm.tqdm(loader, desc="Val", leave=False)
+    pbar = tqdm.tqdm(enumerate(loader), desc="Val", leave=False)
     
-    for (inputs, targets) in pbar:
+    for i, (inputs, targets) in pbar:
 
         inputs, targets = inputs.to(device), targets.to(device)
 

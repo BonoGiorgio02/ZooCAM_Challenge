@@ -115,26 +115,30 @@ def build_transform_blocks(img_size=128, to_rgb=True, pad_fill=255):
     # Geometry augmentation (TRAIN only)
     geo_aug_train = [
         v2.RandomHorizontalFlip(p=0.3),
-        v2.RandomVerticalFlip(p=0.3),
-        v2.RandomRotation(degrees=180, fill=fill),
+        v2.RandomVerticalFlip(p=0.2),
+        v2.RandomRotation(degrees=20, fill=fill),
         v2.RandomAffine(
             degrees=0,
             translate=(0.05, 0.05),
             scale=(0.9, 1.1),
-            fill=fill,
+            shear=(-5,5)
         ),
+        v2.RandomPerspective(distortion_scale=0.15, p=0.1, fill=fill),
     ]
 
     # Photometric augmentation (TRAIN only)
     photometric_train = [
+        v2.ColorJitter(brightness=0.2, contrast=0.2),
         v2.RandomAutocontrast(p=0.1),
         v2.RandomEqualize(p=0.1),
-        v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.2),
+        v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.1),
+        v2.RandomAdjustSharpness(sharpness_factor=2.0, p=0.05),
     ]
 
     # Final: float + normalize
     to_tensor_norm = [
         v2.ToDtype(torch.float32, scale=True),
+        v2.RandomErasing(p=0.1, scale=(0.05,0.05)),
         v2.Normalize(mean=mean, std=std),
     ]
 
@@ -226,17 +230,24 @@ def get_dataloaders(data_config, use_cuda):
 
     # TODO: Improve data augmentation with other v2 transforms
     # Baseline transforms 
+    train_transform, val_transform = build_train_val_transforms(
+        img_size=img_size,
+        to_rgb=to_rgb,
+        pad_fill=pad_fill,
+    )
+    
     input_transform = transforms.Compose([
         transforms.Grayscale(),
         transforms.Resize((128, 128)),
         transforms.ToTensor()
     ])
     
-    train_full = ImageFolder(root=data_config["trainpath"], transform=input_transform)
+    train_full = ImageFolder(root=data_config["trainpath"], transform=train_transform)
+    val_full = ImageFolder(root=data_config["trainpath"], transform=val_transform)
     
     test_dataset = InferenceImageDataset(
         root=data_config["testpath"],
-        transform=input_transform,
+        transform=val_transform,
     )
     
     labels = np.array([y for _, y in train_full.samples])
@@ -250,7 +261,7 @@ def get_dataloaders(data_config, use_cuda):
     )
     
     train_dataset = torch.utils.data.Subset(train_full, train_indices)
-    valid_dataset = torch.utils.data.Subset(train_full, valid_indices)
+    valid_dataset = torch.utils.data.Subset(val_full, valid_indices)
 
     # Build the dataloaders
     train_loader = torch.utils.data.DataLoader(
