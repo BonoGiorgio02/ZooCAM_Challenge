@@ -6,34 +6,18 @@ import random
 from pathlib import Path
 
 # External imports
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
-import torch.nn as nn
 import torch.utils.data
-import torchvision
-from torchvision import transforms
+import torchvision.transforms.functional as F
+from sklearn.model_selection import train_test_split
 from torchvision.datasets import ImageFolder
 from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
-import torchvision.transforms.functional as F
+from torchvision.transforms import v2
 
-import numpy as np
-import matplotlib.pyplot as plt
-
-
-def show(imgs):
-    if not isinstance(imgs, list):
-        imgs = [imgs]
-    fig, axs = plt.subplots(ncols=len(imgs), squeeze=False)
-    for i, img in enumerate(imgs):
-        img = img.detach()
-        img = F.to_pil_image(img)
-        axs[0, i].imshow(np.asarray(img))
-        axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
-
-def show_image(X):
-    num_c = X.shape[0]
-    plt.figure()
-    plt.imshow(X[0] if num_c == 1 else X.permute(1, 2, 0))
-    plt.show()
+# Local imports
+from . import analysis
 
 
 class InferenceImageDataset(torch.utils.data.Dataset):
@@ -42,8 +26,9 @@ class InferenceImageDataset(torch.utils.data.Dataset):
     def __init__(self, root, transform=None):
         self.root = Path(root)
         self.transform = transform
+        valid_exts = {ext.lower() for ext in IMG_EXTENSIONS}
         self.samples = sorted(
-            p for p in self.root.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTENSIONS
+            p for p in self.root.rglob("*") if p.is_file() and p.suffix.lower() in valid_exts
         )
 
         if len(self.samples) == 0:
@@ -60,65 +45,312 @@ class InferenceImageDataset(torch.utils.data.Dataset):
         return img, path.name
 
 
+class EnsureNumChannels(torch.nn.Module):
+    """Ensure CHW tensor has the expected number of channels."""
+
+    def __init__(self, out_channels=3):
+        super().__init__()
+        if out_channels not in (1, 3):
+            raise ValueError("out_channels must be 1 or 3")
+        self.out_channels = out_channels
+
+    def forward(self, x):
+        if x.ndim != 3:
+            raise ValueError(f"Expected CHW tensor, got shape {tuple(x.shape)}")
+
+        c = x.shape[0]
+        if c == self.out_channels:
+            return x
+
+        if self.out_channels == 3:
+            if c == 1:
+                return x.repeat(3, 1, 1)
+            return x[:3]
+
+        # self.out_channels == 1
+        if c == 3:
+            return x.mean(dim=0, keepdim=True)
+        return x[:1]
+
+
+class PadToSquare(torch.nn.Module):
+    """Pad a CHW image tensor to square using a constant fill color."""
+
+    def __init__(self, fill=(255, 255, 255)):
+        super().__init__()
+        self.fill = fill
+
+    def forward(self, x):
+        _, h, w = x.shape
+        if h == w:
+            return x
+
+        m = max(h, w)
+        pad_left = (m - w) // 2
+        pad_right = m - w - pad_left
+        pad_top = (m - h) // 2
+        pad_bottom = m - h - pad_top
+
+        return v2.functional.pad(
+            x,
+            [pad_left, pad_top, pad_right, pad_bottom],
+            fill=self.fill,
+        )
+
+
+def show(imgs):
+    if not isinstance(imgs, list):
+        imgs = [imgs]
+    _, axs = plt.subplots(ncols=len(imgs), squeeze=False)
+    for i, img in enumerate(imgs):
+        img = img.detach()
+        img = F.to_pil_image(img)
+        axs[0, i].imshow(np.asarray(img))
+        axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
+
+
+def show_image(X):
+    num_c = X.shape[0]
+    plt.figure()
+    plt.imshow(X[0] if num_c == 1 else X.permute(1, 2, 0))
+    plt.show()
+
+
+def build_transform_blocks(img_size=128, to_rgb=True, pad_fill=255):
+    """
+    Return transform blocks (lists) so you can compose train/val pipelines.
+    """
+    out_channels = 3 if to_rgb else 1
+    mean = [0.485, 0.456, 0.406] if to_rgb else [0.5]
+    std = [0.229, 0.224, 0.225] if to_rgb else [0.5]
+    fill = (pad_fill, pad_fill, pad_fill) if to_rgb else pad_fill
+
+    common_pre = [
+        v2.ToImage(),
+        EnsureNumChannels(out_channels=out_channels),
+    ]
+
+    resize_pad = [
+        PadToSquare(fill=fill),
+        v2.Resize((img_size, img_size), antialias=True),
+    ]
+
+    geo_aug_train = [
+        v2.RandomHorizontalFlip(p=0.5),
+        v2.RandomVerticalFlip(p=0.2),
+        v2.RandomRotation(degrees=25, fill=fill),
+        v2.RandomAffine(
+            degrees=0,
+            translate=(0.05, 0.05),
+            scale=(0.9, 1.1),
+            fill=fill,
+        ),
+    ]
+
+    photometric_train = [
+        v2.RandomAutocontrast(p=0.1),
+        v2.RandomEqualize(p=0.1),
+        v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.15),
+    ]
+
+    to_tensor_norm = [
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=mean, std=std),
+    ]
+
+    return {
+        "common_pre": common_pre,
+        "resize_pad": resize_pad,
+        "geo_aug_train": geo_aug_train,
+        "photometric_train": photometric_train,
+        "to_tensor_norm": to_tensor_norm,
+    }
+
+
+def build_train_val_transforms(img_size=128, to_rgb=True, pad_fill=255):
+    blocks = build_transform_blocks(img_size=img_size, to_rgb=to_rgb, pad_fill=pad_fill)
+
+    train_tf = v2.Compose(
+        blocks["common_pre"]
+        + blocks["resize_pad"]
+        + blocks["geo_aug_train"]
+        + blocks["photometric_train"]
+        + blocks["to_tensor_norm"]
+    )
+
+    val_tf = v2.Compose(
+        blocks["common_pre"]
+        + blocks["resize_pad"]
+        + blocks["to_tensor_norm"]
+    )
+
+    return train_tf, val_tf
+
+
+def _seed_worker(worker_id):
+    # Keep numpy/python randomness deterministic per worker.
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def _build_loader(dataset, batch_size, shuffle, num_workers, pin_memory, *, seed, drop_last=False, sampler=None, persistent_workers=True, prefetch_factor=2):
+    loader_kwargs = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": shuffle if sampler is None else False,
+        "sampler": sampler,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "drop_last": drop_last,
+    }
+
+    if num_workers > 0:
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+        loader_kwargs["worker_init_fn"] = _seed_worker
+        loader_kwargs["generator"] = generator
+        loader_kwargs["persistent_workers"] = persistent_workers
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    return torch.utils.data.DataLoader(**loader_kwargs)
+
+
+def _compute_balanced_class_weights(labels, num_classes):
+    counts = np.bincount(labels, minlength=num_classes).astype(np.float64)
+    counts = np.clip(counts, a_min=1.0, a_max=None)
+    weights = len(labels) / (num_classes * counts)
+    weights = weights / weights.mean()
+    return weights.astype(np.float32)
+
+
 def get_dataloaders(data_config, use_cuda):
-    valid_ratio = data_config["valid_ratio"]
-    batch_size = data_config["batch_size"]
-    num_workers = data_config["num_workers"]
+    valid_ratio = data_config.get("valid_ratio", 0.1)
+    batch_size = data_config.get("batch_size", 128)
+    num_workers = data_config.get("num_workers", 4)
+    seed = data_config.get("seed", 0)
+
+    img_size = data_config.get("img_size", 128)
+    to_rgb = data_config.get("to_rgb", True)
+    pad_fill = data_config.get("pad_fill", 255)
+
+    pin_memory = data_config.get("pin_memory", use_cuda)
+    persistent_workers = data_config.get("persistent_workers", num_workers > 0)
+    prefetch_factor = data_config.get("prefetch_factor", 2)
+    drop_last_train = data_config.get("drop_last_train", False)
 
     logging.info("  - Dataset creation")
+    train_base = ImageFolder(root=data_config["trainpath"], transform=None)
+    if len(train_base) == 0:
+        raise ValueError(f"Empty train dataset at {data_config['trainpath']}")
 
-    input_transform = transforms.Compose(
-        [transforms.Grayscale(), transforms.Resize((128, 128)), transforms.ToTensor()]
+    # --- Analysis step (one-shot)
+    analysis_cfg = data_config.get("analysis", {})
+    if analysis_cfg.get("compute_analysis", False):
+        analysis.analyze_imagefolder(
+            train_base,
+            sample_size=analysis_cfg.get("sample_size", 200000),
+            seed=seed,
+            out_dir=analysis_cfg.get("out_dir", "./analysis"),
+            compute_percentiles=analysis_cfg.get("compute_percentiles", True),
+        )
+    else:
+        logging.info(
+            "  - Dataset analysis disabled (set data.analysis.compute_analysis=true to run it)"
+        )
+
+    train_tf, eval_tf = build_train_val_transforms(
+        img_size=img_size,
+        to_rgb=to_rgb,
+        pad_fill=pad_fill,
     )
 
-    root_train_dataset = ImageFolder(
-        root=data_config["trainpath"],
-        transform=input_transform,
+    # Separate dataset instances so train and val can use different transforms.
+    train_full = ImageFolder(root=data_config["trainpath"], transform=train_tf)
+    valid_full = ImageFolder(root=data_config["trainpath"], transform=eval_tf)
+    test_dataset = InferenceImageDataset(root=data_config["testpath"], transform=eval_tf)
+
+    labels = np.fromiter((y for _, y in train_base.samples), dtype=np.int64, count=len(train_base.samples))
+    indices = np.arange(len(labels))
+
+    train_indices, valid_indices = train_test_split(
+        indices,
+        test_size=valid_ratio,
+        stratify=labels,
+        random_state=seed,
     )
-    
-    test_dataset = InferenceImageDataset(
-        root=data_config["testpath"],
-        transform=input_transform,
-    )
 
-    logging.info(f"  - I loaded {len(root_train_dataset)} train samples")
-    logging.info(f"  - I loaded {len(test_dataset)} test samples")
+    train_dataset = torch.utils.data.Subset(train_full, train_indices)
+    valid_dataset = torch.utils.data.Subset(valid_full, valid_indices)
 
-    indices = list(range(len(root_train_dataset)))
-    random.shuffle(indices)
-    num_valid = int(valid_ratio * len(root_train_dataset))
-    train_indices = indices[num_valid:]
-    valid_indices = indices[:num_valid]
+    num_classes = len(train_full.classes)
+    train_labels = labels[train_indices]
+    class_weights = _compute_balanced_class_weights(train_labels, num_classes)
 
-    train_dataset = torch.utils.data.Subset(root_train_dataset, train_indices)
-    valid_dataset = torch.utils.data.Subset(root_train_dataset, valid_indices)
+    imbalance_cfg = data_config.get("imbalance", {})
+    use_weighted_sampler = imbalance_cfg.get("use_weighted_sampler", False)
+    compute_class_weights = imbalance_cfg.get("compute_class_weights", True)
 
-    # Build the dataloaders
-    train_loader = torch.utils.data.DataLoader(
+    train_sampler = None
+    if use_weighted_sampler:
+        sample_weights = class_weights[train_labels]
+        train_sampler = torch.utils.data.WeightedRandomSampler(
+            weights=torch.as_tensor(sample_weights, dtype=torch.double),
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        logging.info("  - Using WeightedRandomSampler for class imbalance")
+
+    train_loader = _build_loader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
         num_workers=num_workers,
-        pin_memory=use_cuda,
+        pin_memory=pin_memory,
+        seed=seed,
+        drop_last=drop_last_train,
+        sampler=train_sampler,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
 
-    valid_loader = torch.utils.data.DataLoader(
+    valid_loader = _build_loader(
         valid_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=use_cuda,
+        pin_memory=pin_memory,
+        seed=seed + 1,
+        drop_last=False,
+        sampler=None,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
-    
-    test_loader = torch.utils.data.DataLoader(
+
+    test_loader = _build_loader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=use_cuda,
+        pin_memory=pin_memory,
+        seed=seed + 2,
+        drop_last=False,
+        sampler=None,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
 
-    num_classes = len(root_train_dataset.classes)
-    input_size = tuple(root_train_dataset[0][0].shape)
+    input_size = tuple(train_full[0][0].shape)
+
+    if compute_class_weights:
+        train_loader.class_weights = torch.tensor(class_weights, dtype=torch.float32)
+
+    train_loader.num_classes = num_classes
+
+    logging.info(
+        f"  - Train/Val/Test sizes: {len(train_dataset)}/{len(valid_dataset)}/{len(test_dataset)}"
+    )
+    logging.info(f"  - Input size: {input_size} | Classes: {num_classes}")
 
     return train_loader, valid_loader, test_loader, input_size, num_classes

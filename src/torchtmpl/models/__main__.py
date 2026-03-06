@@ -52,7 +52,27 @@ def test_resnet():
     print(f"Output tensor of size : {output.shape}")
 
 
+def test_torchvision_resnet():
+    cfg = {
+        "class": "TorchvisionResNet",
+        "backbone": "resnet18",
+        "pretrained": False,
+        "dropout": 0.0,
+    }
+    input_size = (3, 224, 224)
+    batch_size = 4
+    num_classes = 18
+    model = build_model(cfg, input_size, num_classes)
+
+    input_tensor = torch.randn(batch_size, *input_size)
+    output = model(input_tensor)
+    expected_output_size = (batch_size, num_classes)
+    assert expected_output_size == output.shape
+    print(f"Output tensor of size : {output.shape}")
+
+
 if __name__ == "__main__":
     test_linear()
     test_cnn()
     test_resnet()
+    test_torchvision_resnet()

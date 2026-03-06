@@ -1,27 +1,81 @@
 data:
   trainpath: '/mounts/datasets/datasets/2025-ZooCamChallenge/train'
   testpath: '/mounts/datasets/datasets/2025-ZooCamChallenge/test'
-  batch_size: 64
-  num_workers: 4
-  valid_ratio: 0.2
+  batch_size: 128
+  num_workers: 8
+  valid_ratio: 0.1
+  seed: 42
+
+  # Data pipeline (used by get_dataloaders)
+  img_size: 224
+  to_rgb: true
+  pad_fill: 255
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last_train: false
+
+  imbalance:
+    use_weighted_sampler: true
+    compute_class_weights: true
+
+  analysis:
+    compute_analysis: false
+    out_dir: './analysis'
+    compute_percentiles: true
 
 optim:
-  algo: Adam
+  algo: AdamW
   params:
-    lr: 0.0001
+    lr: 0.0005
+    betas: [0.9, 0.999]
+    eps: 1.0e-08
+    weight_decay: 0.01
+  scheduler:
+    algo: CosineAnnealingLR
+    step: epoch
+    monitor: val_macro_f1
+    params:
+      T_max: 30
+      eta_min: 1.0e-06
 
-nepochs: 20
-loss: "CrossEntropyLoss"
+nepochs: 30
+
+loss:
+  name: CrossEntropyLoss
+  params:
+    label_smoothing: 0.05
+
+train:
+  amp: true
+  max_grad_norm: 1.0
+  use_class_weights: false
+  selection_metric: val_macro_f1
+  selection_mode: max
+  # Resume from full training state (model + optimizer + scheduler + epoch).
+  resume_checkpoint: "./logs/TorchvisionResNet_0/training_state.pt"
+  resume_in_place: true
+  resume_strict: true
+  # Set to the number of epochs already completed when resuming from plain best_model.pt.
+  resume_epoch: null
+  # Useful if model.freeze_backbone is true.
+  unfreeze_backbone_epoch: null
 
 logging:
+  # Train creates a unique run directory: <logdir>/TorchvisionResNet_<n>
   logdir: "./logs"
 
 model:
-  class: VanillaCNN
-  num_layers: 4
+  class: TorchvisionResNet
+  backbone: resnet18
+  pretrained: true
+  weights: DEFAULT
+  freeze_backbone: false
+  dropout: 0.2
 
 test:
-  checkpoint: "./logs/VanillaCNN_0/best_model.pt" 
+  # Update <n> to the run index produced by train.
+  checkpoint: "./logs/TorchvisionResNet_0/best_model.pt"
 
 output:
-  submission_path: "./submission.csv"
+  submission_path: "./outputs/submission_torchvision_resnet18.csv"

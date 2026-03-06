@@ -1,6 +1,7 @@
 # coding: utf-8
 
 # Standard imports
+import contextlib
 import os
 
 # External imports
@@ -30,7 +31,7 @@ def generate_unique_logpath(logdir, raw_run_name):
 
 class ModelCheckpoint(object):
     """
-    Early stopping callback
+    Model checkpoint callback.
     """
 
     def __init__(
@@ -61,80 +62,134 @@ class ModelCheckpoint(object):
         return False
 
 
-def train(model, loader, f_loss, optimizer, device, dynamic_display=True):
-    """
-    Train a model for one epoch, iterating over the loader
-    using the f_loss to compute the loss and the optimizer
-    to update the parameters of the model.
-    Arguments :
-    model     -- A torch.nn.Module object
-    loader    -- A torch.utils.data.DataLoader
-    f_loss    -- The loss function, i.e. a loss Module
-    optimizer -- A torch.optim.Optimzer object
-    device    -- A torch.device
-    Returns :
-    The averaged train metrics computed over a sliding window
-    """
+def _update_confusion_matrix(confusion, preds, targets, num_classes):
+    valid = (targets >= 0) & (targets < num_classes)
+    idx = num_classes * targets[valid].to(torch.int64) + preds[valid].to(torch.int64)
+    bins = torch.bincount(idx, minlength=num_classes * num_classes)
+    confusion += bins.reshape(num_classes, num_classes)
 
-    # We enter train mode.
-    # This is important for layers such as dropout, batchnorm, ...
+
+def macro_f1_from_confusion(confusion):
+    conf = confusion.to(torch.float32)
+    tp = torch.diag(conf)
+    fp = conf.sum(dim=0) - tp
+    fn = conf.sum(dim=1) - tp
+    denom = 2 * tp + fp + fn
+    f1 = torch.where(denom > 0, (2 * tp) / denom, torch.zeros_like(tp))
+    return float(f1.mean().item())
+
+
+def train(
+    model,
+    loader,
+    f_loss,
+    optimizer,
+    device,
+    *,
+    scaler=None,
+    amp_enabled=False,
+    scheduler=None,
+    scheduler_step="epoch",
+    grad_clip_norm=None,
+):
+    """
+    Train a model for one epoch.
+    Returns:
+        Averaged train loss.
+    """
     model.train()
 
-    total_loss = 0
+    use_amp = bool(amp_enabled and device.type == "cuda")
+    total_loss = 0.0
     num_samples = 0
-    for i, (inputs, targets) in (pbar := tqdm.tqdm(enumerate(loader))):
 
-        inputs, targets = inputs.to(device), targets.to(device)
+    for _, (inputs, targets) in (pbar := tqdm.tqdm(enumerate(loader), total=len(loader))):
+        inputs, targets = inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
 
-        # Compute the forward propagation
-        outputs = model(inputs)
+        optimizer.zero_grad(set_to_none=True)
 
-        loss = f_loss(outputs, targets)
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if use_amp
+            else contextlib.nullcontext()
+        )
+        with amp_ctx:
+            outputs = model(inputs)
+            loss = f_loss(outputs, targets)
 
-        # Backward and optimize
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        if scaler is not None and use_amp:
+            scaler.scale(loss).backward()
+            if grad_clip_norm is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+            optimizer.step()
 
-        # Update the metrics
-        # We here consider the loss is batch normalized
+        if scheduler is not None and scheduler_step == "batch":
+            scheduler.step()
+
         total_loss += inputs.shape[0] * loss.item()
         num_samples += inputs.shape[0]
-        pbar.set_description(f"Train loss : {total_loss/num_samples:.2f}")
+        pbar.set_description(f"Train loss: {total_loss / max(num_samples, 1):.4f}")
 
-    return total_loss / num_samples
+    return total_loss / max(num_samples, 1)
+
+
+def evaluate(model, loader, f_loss, device, *, amp_enabled=False, num_classes=None):
+    """
+    Evaluate model on loader and return (loss, macro_f1).
+    """
+    model.eval()
+    use_amp = bool(amp_enabled and device.type == "cuda")
+
+    total_loss = 0.0
+    num_samples = 0
+
+    confusion = None
+
+    with torch.inference_mode():
+        for inputs, targets in loader:
+            inputs = inputs.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+
+            amp_ctx = (
+                torch.autocast(device_type="cuda", dtype=torch.float16)
+                if use_amp
+                else contextlib.nullcontext()
+            )
+            with amp_ctx:
+                outputs = model(inputs)
+                loss = f_loss(outputs, targets)
+
+            preds = torch.argmax(outputs, dim=1)
+
+            if confusion is None:
+                current_num_classes = outputs.shape[1] if num_classes is None else num_classes
+                confusion = torch.zeros(
+                    (current_num_classes, current_num_classes),
+                    dtype=torch.long,
+                )
+            _update_confusion_matrix(confusion, preds.detach().cpu(), targets.detach().cpu(), confusion.shape[0])
+
+            total_loss += inputs.shape[0] * loss.item()
+            num_samples += inputs.shape[0]
+
+    if confusion is None:
+        return 0.0, 0.0
+
+    macro_f1 = macro_f1_from_confusion(confusion)
+    avg_loss = total_loss / max(num_samples, 1)
+    return avg_loss, macro_f1
 
 
 def test(model, loader, f_loss, device):
     """
-    Test a model over the loader
-    using the f_loss as metrics
-    Arguments :
-    model     -- A torch.nn.Module object
-    loader    -- A torch.utils.data.DataLoader
-    f_loss    -- The loss function, i.e. a loss Module
-    device    -- A torch.device
-    Returns :
+    Backward-compatible test helper returning only loss.
     """
-
-    # We enter eval mode.
-    # This is important for layers such as dropout, batchnorm, ...
-    model.eval()
-
-    total_loss = 0
-    num_samples = 0
-    for (inputs, targets) in loader:
-
-        inputs, targets = inputs.to(device), targets.to(device)
-
-        # Compute the forward propagation
-        outputs = model(inputs)
-
-        loss = f_loss(outputs, targets)
-
-        # Update the metrics
-        # We here consider the loss is batch normalized
-        total_loss += inputs.shape[0] * loss.item()
-        num_samples += inputs.shape[0]
-
-    return total_loss / num_samples
+    loss, _ = evaluate(model, loader, f_loss, device)
+    return loss
