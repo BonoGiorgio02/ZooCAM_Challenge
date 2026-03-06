@@ -70,7 +70,7 @@ train:
   selection_mode: max
   use_class_weights: false
 
-  resume_checkpoint: "./logs/ConvNeXtTinyMeta_0/training_state.pt"
+  resume_checkpoint: "./logs/ConvNeXtTinyMeta_2/training_state.pt"
   resume_in_place: false
   resume_strict: true
   resume_epoch: null
