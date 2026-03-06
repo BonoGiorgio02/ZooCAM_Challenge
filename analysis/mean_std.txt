@@ -1,0 +1,10 @@
+= Building the dataloaders
+  - Dataset creation
+  - Loaded 1093785 train samples
+  - Loaded 121428 test samples
+Computing mean/std: 100% 1093785/1093785 [05:55<00:00, 3076.60it/s]
+
+Dataset grayscale statistics
+Mean: 0.886471
+Std : 0.208829
+Bad images skipped: 0

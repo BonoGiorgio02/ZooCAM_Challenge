@@ -1,12 +1,12 @@
 data:
   trainpath: '/mounts/datasets/datasets/2025-ZooCamChallenge/train'
   testpath: '/mounts/datasets/datasets/2025-ZooCamChallenge/test'
-  batch_size: 256
+  batch_size: 64
   num_workers: 4
   valid_ratio: 0.1
-  seed: 7
+  seed: 42
 
-  img_size: 128
+  img_size: 192
   to_rgb: true
   pad_fill: 255
 
@@ -24,7 +24,7 @@ optim:
 scheduler:
   algo: CosineAnnealingLR
   params:
-    T_max: 10
+    T_max: 6
     eta_min: 1.0e-6
 
 nepochs: 15
@@ -38,7 +38,7 @@ logging:
 
 model:
   class: ResNetClassifier
-  name: "resnet101"
+  name: "resnet50"
   pretrained: true
   freeze_backbone: false
   unfreeze_layer4: true
@@ -49,10 +49,10 @@ train:
   resume: false
   checkpoint: ""
   # resume: true
-  # checkpoint: "./logs/ResNetClassifier_3/best_model.pt"
+  # checkpoint: "./logs/ResNetClassifier_0/best_model.pt"
 
 test:
-  checkpoint: "./logs/ResNetClassifier_2/best_model.pt" 
+  checkpoint: "./logs/ResNetClassifier_0/best_model.pt" 
 
 output:
   submission_path: "./submission.csv"

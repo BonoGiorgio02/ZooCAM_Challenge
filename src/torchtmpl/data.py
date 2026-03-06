@@ -95,8 +95,8 @@ def build_transform_blocks(img_size=128, to_rgb=True, pad_fill=255):
     Return transform blocks (lists) so you can compose train/val pipelines.
     """
     # ImageNet normalization (useful for pretrained backbones)
-    mean = [0.485, 0.456, 0.406] if to_rgb else [0.5]
-    std  = [0.229, 0.224, 0.225] if to_rgb else [0.5]
+    mean = [0.886471]*3 if to_rgb else [0.886471]
+    std  = [0.208829]*3 if to_rgb else [0.208829]
 
     fill = (pad_fill, pad_fill, pad_fill) if to_rgb else pad_fill
 
@@ -114,31 +114,26 @@ def build_transform_blocks(img_size=128, to_rgb=True, pad_fill=255):
 
     # Geometry augmentation (TRAIN only)
     geo_aug_train = [
-        v2.RandomHorizontalFlip(p=0.3),
-        v2.RandomVerticalFlip(p=0.2),
-        v2.RandomRotation(degrees=20, fill=fill),
-        v2.RandomAffine(
-            degrees=0,
-            translate=(0.05, 0.05),
-            scale=(0.9, 1.1),
-            shear=(-5,5)
-        ),
-        v2.RandomPerspective(distortion_scale=0.15, p=0.1, fill=fill),
+        v2.RandomHorizontalFlip(p=0.2),
+        v2.RandomVerticalFlip(p=0.1),
     ]
 
     # Photometric augmentation (TRAIN only)
     photometric_train = [
-        v2.ColorJitter(brightness=0.2, contrast=0.2),
-        v2.RandomAutocontrast(p=0.1),
-        v2.RandomEqualize(p=0.1),
-        v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.1),
-        v2.RandomAdjustSharpness(sharpness_factor=2.0, p=0.05),
+        v2.RandomApply([v2.ColorJitter(brightness=0.2, contrast=0.2)], p=0.1),
+        v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.05),
     ]
 
-    # Final: float + normalize
-    to_tensor_norm = [
+    # Final: float + normalize (TRAIN only)
+    to_tensor_norm_train = [
         v2.ToDtype(torch.float32, scale=True),
-        v2.RandomErasing(p=0.1, scale=(0.05,0.05)),
+        v2.RandomErasing(p=0.05, scale=(0.02,0.10), value=1.0),
+        v2.Normalize(mean=mean, std=std),
+    ]
+
+    # Final: float + normalize (VAL only)
+    to_tensor_norm_val = [
+        v2.ToDtype(torch.float32, scale=True),
         v2.Normalize(mean=mean, std=std),
     ]
 
@@ -147,8 +142,10 @@ def build_transform_blocks(img_size=128, to_rgb=True, pad_fill=255):
         "resize_pad": resize_pad,
         "geo_aug_train": geo_aug_train,
         "photometric_train": photometric_train,
-        "to_tensor_norm": to_tensor_norm,
+        "to_tensor_norm_train": to_tensor_norm_train,
+        "to_tensor_norm_val": to_tensor_norm_val,
     }
+
 
 
 def build_train_val_transforms(img_size=128, to_rgb=True, pad_fill=255):
@@ -159,13 +156,13 @@ def build_train_val_transforms(img_size=128, to_rgb=True, pad_fill=255):
         + blocks["resize_pad"]
         + blocks["geo_aug_train"]
         + blocks["photometric_train"]
-        + blocks["to_tensor_norm"]
+        + blocks["to_tensor_norm_train"]
     )
 
     val_tf = v2.Compose(
         blocks["common_pre"]
         + blocks["resize_pad"]
-        + blocks["to_tensor_norm"]
+        + blocks["to_tensor_norm_val"]
     )
 
     return train_tf, val_tf
@@ -215,16 +212,21 @@ def get_dataloaders(data_config, use_cuda):
         # Build base datasets without transforms
         train_base, test_dataset = build_datasets(data_config)
         
-        sample_size = analysis_cfg.get("sample_size", 200000)
+        sample_size = analysis_cfg.get("sample_size", None)
         save_dir = analysis_cfg.get("out_dir", "./analysis")
         compute_percentiles = analysis_cfg.get("compute_percentiles", True)
 
-        counts_df, report = analysis.analyze_imagefolder(
+        analysis.compute_dataset_mean_std(
             train_base,
             sample_size=sample_size,
             seed=seed,
-            out_dir=save_dir,
         )
+        # counts_df, report = analysis.analyze_imagefolder(
+        #     train_base,
+        #     sample_size=sample_size,
+        #     seed=seed,
+        #     out_dir=save_dir,
+        # )
     else:
         logging.info("  - Dataset analysis disabled (set data.analysis.enabled=true to run it)")
 

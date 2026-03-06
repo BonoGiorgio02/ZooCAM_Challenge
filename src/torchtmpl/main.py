@@ -220,7 +220,7 @@ def test(config):
 
     logging.info(f"Loading checkpoint: {ckpt_path}")
     state = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(state)
+    model.load_state_dict(state["model"])
 
     all_imgnames = []
     all_labels = []
