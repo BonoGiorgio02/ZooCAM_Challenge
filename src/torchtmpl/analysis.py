@@ -154,3 +154,60 @@ def analyze_imagefolder(
     logging.info("\n" + class_counts_df.tail(10).to_string(index=False))
 
     return class_counts_df, report
+
+def compute_dataset_mean_std(
+    ds: ImageFolder,
+    sample_size: Optional[int] = None,
+    seed: int = 0,
+):
+    """
+    Compute dataset grayscale mean and std for an ImageFolder.
+
+    Args:
+        ds: ImageFolder created with transform=None
+        sample_size: number of images to scan (None = scan all)
+        seed: random seed for sampling
+    """
+
+    num_images = len(ds.samples)
+
+    rng = np.random.default_rng(seed)
+    all_idx = np.arange(num_images)
+
+    if sample_size is not None and sample_size < num_images:
+        scan_idx = rng.choice(all_idx, size=sample_size, replace=False)
+    else:
+        scan_idx = all_idx
+
+    pixel_sum = 0.0
+    pixel_sq_sum = 0.0
+    pixel_count = 0
+    bad = 0
+
+    for i in tqdm(scan_idx, desc="Computing mean/std"):
+        path, _ = ds.samples[int(i)]
+
+        try:
+            with Image.open(path) as im:
+                im = im.convert("L")
+                arr = np.asarray(im, dtype=np.float32) / 255.0
+
+                pixel_sum += arr.sum()
+                pixel_sq_sum += (arr ** 2).sum()
+                pixel_count += arr.size
+
+        except Exception:
+            bad += 1
+
+    if pixel_count == 0:
+        raise RuntimeError("No readable images found.")
+
+    mean = pixel_sum / pixel_count
+    std = np.sqrt(pixel_sq_sum / pixel_count - mean ** 2)
+
+    print("\nDataset grayscale statistics")
+    print(f"Mean: {mean:.6f}")
+    print(f"Std : {std:.6f}")
+    print(f"Bad images skipped: {bad}")
+
+    return mean, std
