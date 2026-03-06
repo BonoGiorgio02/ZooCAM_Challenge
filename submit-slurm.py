@@ -2,10 +2,12 @@
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 DEFAULT_PARTITION = "gpu_prod_long"
@@ -139,7 +141,55 @@ def submit_or_raise(job_script):
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(f"sbatch submission failed: {detail}")
-    print(result.stdout.strip())
+    submission_line = result.stdout.strip()
+    print(submission_line)
+    return extract_job_id(submission_line)
+
+
+def extract_job_id(sbatch_output):
+    match = re.search(r"Submitted batch job (\d+)", sbatch_output or "")
+    return int(match.group(1)) if match else None
+
+
+def get_job_state(job_id):
+    result = subprocess.run(
+        ["squeue", "-h", "-j", str(job_id), "-o", "%T"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    state = result.stdout.strip()
+    return state if state else None
+
+
+def wait_for_job_start(job_id, poll_seconds=20):
+    print(f"Waiting for job {job_id} to start...")
+    terminal_states = {
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMEOUT",
+        "OUT_OF_MEMORY",
+        "PREEMPTED",
+        "BOOT_FAIL",
+        "NODE_FAIL",
+    }
+    while True:
+        state = get_job_state(job_id)
+        if state is None:
+            print(
+                f"Job {job_id} is no longer in queue. Check details with: "
+                f"sacct -j {job_id} --format=JobID,State,ExitCode"
+            )
+            return
+        print(f"Job {job_id} state: {state}")
+        if state == "RUNNING":
+            return
+        if state in terminal_states:
+            return
+        time.sleep(poll_seconds)
 
 
 def parse_slurm_time_to_seconds(value):
@@ -229,14 +279,16 @@ def reserve_with_fallback(duration, partition, constraint, exclusive):
         )
         result = submit_job(job_script)
         if result.returncode == 0:
-            print(result.stdout.strip())
+            submission_line = result.stdout.strip()
+            print(submission_line)
+            job_id = extract_job_id(submission_line)
             if part_constraint:
                 print(
                     f"Reservation accepted on partition={part_name} with constraint={part_constraint}"
                 )
             else:
                 print(f"Reservation accepted on partition={part_name} without constraint")
-            return
+            return job_id
 
         detail = (result.stderr or result.stdout or "").strip()
         failures.append(
@@ -291,6 +343,8 @@ def parse_args():
     parser.add_argument("--partition", default=DEFAULT_PARTITION)
     parser.add_argument("--constraint", default=None)
     parser.add_argument("--no-exclusive", action="store_true")
+    parser.add_argument("--wait-start", action="store_true")
+    parser.add_argument("--poll-seconds", type=int, default=20)
     return parser.parse_args()
 
 
@@ -310,12 +364,20 @@ def main():
     os.makedirs("logslurms", exist_ok=True)
 
     if args.reserve_only:
-        reserve_with_fallback(
+        job_id = reserve_with_fallback(
             duration=args.duration,
             partition=args.partition,
             constraint=args.constraint if args.constraint else None,
             exclusive=exclusive,
         )
+        if job_id is not None:
+            print(
+                f"Track queue: squeue -j {job_id} -o \"%.18i %.9P %.8j %.8T %.10M %.10l %.6D %R\""
+            )
+            print(f"When RUNNING, open shell on reserved node: srun --jobid {job_id} --pty bash")
+            if args.wait_start:
+                wait_for_job_start(job_id, poll_seconds=max(5, args.poll_seconds))
+                print(f"Now attach with: srun --jobid {job_id} --pty bash")
         return 0
 
     if not args.config:
@@ -337,7 +399,7 @@ def main():
     shutil.copy2(args.config, tmp_configfilepath)
     tmp_config_relpath = os.path.relpath(tmp_configfilepath, start=os.getcwd())
 
-    submit_or_raise(
+    job_id = submit_or_raise(
         makejob(
             commit_id=commit_id,
             configpath=tmp_config_relpath,
@@ -348,6 +410,18 @@ def main():
             exclusive=exclusive,
         )
     )
+    if job_id is not None:
+        print(
+            f"Track queue: squeue -j {job_id} -o \"%.18i %.9P %.8j %.8T %.10M %.10l %.6D %R\""
+        )
+        if args.nruns == 1:
+            print(f"Train log (when RUNNING): tail -f logslurms/slurm-{job_id}_1.out")
+        else:
+            print(f"Train logs (when RUNNING): ls logslurms/slurm-{job_id}_*.out")
+        if args.wait_start:
+            wait_for_job_start(job_id, poll_seconds=max(5, args.poll_seconds))
+            if args.nruns == 1:
+                print(f"Now follow logs with: tail -f logslurms/slurm-{job_id}_1.out")
     return 0
 
 
