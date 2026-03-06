@@ -4,6 +4,7 @@ import os
 import sys
 import subprocess
 import tempfile
+import shutil
 
 
 def makejob(commit_id, configpath, nruns):
@@ -12,12 +13,14 @@ def makejob(commit_id, configpath, nruns):
 #SBATCH --job-name=templatecode
 #SBATCH --nodes=1
 #SBATCH --partition=gpu_prod_long
+#SBATCH --constraint=tx
+#SBATCH --exclusive
 #SBATCH --time=20:00:00
 #SBATCH --output=logslurms/slurm-%A_%a.out
 #SBATCH --error=logslurms/slurm-%A_%a.err
 #SBATCH --array=1-{nruns}
 
-current_dir=pwd
+current_dir=$(pwd)
 export PATH=$PATH:~/.local/bin
 
 echo "Session " ${{SLURM_ARRAY_JOB_ID}}_${{SLURM_ARRAY_TASK_ID}}
@@ -26,11 +29,11 @@ echo "Running on " $(hostname)
 
 echo "Copying the source directory and data"
 date
-mkdir $TMPDIR/code
-rsync -r --exclude logs --exclude logslurms --exclude configs . $TMPDIR/code
+mkdir -p "$TMPDIR/code"
+rsync -r --exclude logs --exclude logslurms . "$TMPDIR/code"
 
 echo "Checking out the correct version of the code commit_id {commit_id}"
-cd $TMPDIR/code
+cd "$TMPDIR/code"
 git checkout {commit_id}
 
 
@@ -42,7 +45,7 @@ source $TMPDIR/venv/bin/activate
 python -m pip install .
 
 echo "Training"
-python -m torchtmpl.main {configpath} train
+python -m torchtmpl.main "{configpath}" train
 
 # MODIFICATION : On stocke le code de sortie pour rapatrier les logs MÊME si ça a planté
 TRAIN_EXIT_CODE=$?
@@ -51,14 +54,22 @@ TRAIN_EXIT_CODE=$?
 # NOUVEAU : RAPATRIEMENT DES LOGS ET MODÈLES
 # =========================================================
 echo "Retrieving logs from the compute node..."
-mkdir -p $current_dir/logs
+mkdir -p "$current_dir/logs"
 # On renvoie tout le dossier logs du GPU vers ton dossier d'origine
-rsync -avz logs/ $current_dir/logs/
+if [[ -d logs ]]; then
+    rsync -avz logs/ "$current_dir/logs/"
+    RSYNC_EXIT_CODE=$?
+else
+    echo "No logs/ directory found on compute node."
+    RSYNC_EXIT_CODE=0
+fi
 # =========================================================
 
-if [[ $? != 0 ]]; then
-    exit -1
+if [[ $RSYNC_EXIT_CODE != 0 ]]; then
+    exit $RSYNC_EXIT_CODE
 fi
+
+exit $TRAIN_EXIT_CODE
 """
 
 
@@ -86,7 +97,7 @@ if result > 0:
 
 commit_id = subprocess.check_output(
     "git log --pretty=format:'%H' -n 1", shell=True
-).decode()
+).decode().strip()
 
 print(f"I will be using the commit id {commit_id}")
 
@@ -106,7 +117,8 @@ else:
 # Copy the config in a temporary config file
 os.system("mkdir -p configs")
 tmp_configfilepath = tempfile.mkstemp(dir="./configs", suffix="-config.yml")[1]
-os.system(f"cp {configpath} {tmp_configfilepath}")
+shutil.copy2(configpath, tmp_configfilepath)
+tmp_config_relpath = os.path.relpath(tmp_configfilepath, start=os.getcwd())
 
 # Launch the batch jobs
-submit_job(makejob(commit_id, tmp_configfilepath, nruns))
+submit_job(makejob(commit_id, tmp_config_relpath, nruns))
