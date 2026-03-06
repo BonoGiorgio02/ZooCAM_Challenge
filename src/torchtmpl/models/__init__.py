@@ -6,6 +6,7 @@ import torch
 # Local imports
 from .base_models import *
 from .cnn_models import *
+from .convnext_meta import *
 from .resnet_model import *
 from .torchvision_resnet import *
 

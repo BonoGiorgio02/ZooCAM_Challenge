@@ -1,6 +1,8 @@
 # coding: utf-8
 
 # Standard imports
+import contextlib
+import copy
 import csv
 import logging
 import os
@@ -30,18 +32,63 @@ def set_global_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def _prepare_loss_config(config, class_weights, device):
-    loss_cfg = config["loss"]
+def _canonical_loss_name(name):
+    lower = str(name).lower()
+    if lower in {"cross_entropy", "crossentropyloss", "ce"}:
+        return "CrossEntropyLoss"
+    return name
+
+
+def _canonical_optimizer_name(name):
+    lower = str(name).lower()
+    if lower == "adamw":
+        return "AdamW"
+    if lower == "adam":
+        return "Adam"
+    if lower == "sgd":
+        return "SGD"
+    if lower == "rmsprop":
+        return "RMSprop"
+    return name
+
+
+def _prepare_loss_config(
+    config,
+    class_weights,
+    device,
+    *,
+    loss_override=None,
+    label_smoothing_override=None,
+    use_class_weights_override=None,
+):
+    base_loss_cfg = config["loss"]
     train_cfg = config.get("train", {})
     use_class_weights = bool(train_cfg.get("use_class_weights", False))
+    if use_class_weights_override is not None:
+        use_class_weights = bool(use_class_weights_override)
 
-    if isinstance(loss_cfg, str):
-        built = {"name": loss_cfg, "params": {}}
+    if isinstance(base_loss_cfg, str):
+        built = {"name": _canonical_loss_name(base_loss_cfg), "params": {}}
     else:
         built = {
-            "name": loss_cfg["name"],
-            "params": dict(loss_cfg.get("params", {})),
+            "name": _canonical_loss_name(base_loss_cfg["name"]),
+            "params": dict(base_loss_cfg.get("params", {})),
         }
+
+    if loss_override is not None:
+        if isinstance(loss_override, str):
+            built["name"] = _canonical_loss_name(loss_override)
+            built["params"] = {}
+        elif isinstance(loss_override, dict):
+            if "name" not in loss_override:
+                raise ValueError("Phase loss override dict must include 'name'.")
+            built["name"] = _canonical_loss_name(loss_override["name"])
+            built["params"] = dict(loss_override.get("params", {}))
+        else:
+            raise TypeError("loss override must be a string or dictionary")
+
+    if label_smoothing_override is not None:
+        built["params"]["label_smoothing"] = float(label_smoothing_override)
 
     if use_class_weights and class_weights is not None:
         built["params"]["weight"] = class_weights.to(device)
@@ -65,6 +112,7 @@ def _resume_training_state(
     resume_checkpoint,
     device,
     strict=True,
+    ema=None,
 ):
     """
     Resume from either:
@@ -85,6 +133,8 @@ def _resume_training_state(
             scheduler.load_state_dict(state["scheduler_state_dict"])
         if scaler is not None and state.get("scaler_state_dict", None) is not None:
             scaler.load_state_dict(state["scaler_state_dict"])
+        if ema is not None and state.get("ema_state_dict", None) is not None:
+            ema.load_state_dict(state["ema_state_dict"])
 
         if state.get("epoch", None) is not None:
             start_epoch = int(state["epoch"]) + 1
@@ -107,6 +157,230 @@ def _resume_training_state(
     return start_epoch, best_score
 
 
+def _get_phase_for_epoch(train_cfg, epoch_1based):
+    phase_items = []
+    for key, value in train_cfg.items():
+        if not str(key).startswith("phase") or not isinstance(value, dict):
+            continue
+        if "epochs" not in value:
+            continue
+        window = value["epochs"]
+        if not isinstance(window, (list, tuple)) or len(window) != 2:
+            raise ValueError(f"{key}.epochs must be [start, end]")
+        start, end = int(window[0]), int(window[1])
+        phase_items.append((start, end, key, value))
+
+    phase_items.sort(key=lambda x: x[0])
+    for start, end, key, value in phase_items:
+        if start <= epoch_1based <= end:
+            return key, value
+
+    return None, {}
+
+
+def _resolve_img_size_for_epoch(data_cfg, epoch_1based):
+    default_size = int(data_cfg.get("img_size", 128))
+    schedule = data_cfg.get("progressive_resize", None)
+    if not schedule:
+        return default_size
+
+    for entry in schedule:
+        epochs = entry.get("epochs", None)
+        if not isinstance(epochs, (list, tuple)) or len(epochs) != 2:
+            continue
+        start, end = int(epochs[0]), int(epochs[1])
+        if start <= epoch_1based <= end:
+            return int(entry.get("image_size", default_size))
+
+    return default_size
+
+
+def _build_epoch_data_config(base_data_cfg, train_cfg, epoch_1based):
+    phase_name, phase_cfg = _get_phase_for_epoch(train_cfg, epoch_1based)
+    img_size = _resolve_img_size_for_epoch(base_data_cfg, epoch_1based)
+
+    epoch_data_cfg = copy.deepcopy(base_data_cfg)
+    epoch_data_cfg["img_size"] = img_size
+
+    sampler_mode = phase_cfg.get("sampler", epoch_data_cfg.get("sampler_mode", "natural"))
+    class_weight_formula = phase_cfg.get(
+        "class_weight_formula",
+        epoch_data_cfg.get("class_weight_formula", "balanced"),
+    )
+
+    epoch_data_cfg["sampler_mode"] = sampler_mode
+    epoch_data_cfg["class_weight_formula"] = class_weight_formula
+
+    return epoch_data_cfg, phase_name, phase_cfg
+
+
+def _build_optimizer(model, optim_cfg, train_cfg):
+    params = dict(optim_cfg.get("params", {}))
+
+    optimizer_name = train_cfg.get("optimizer", optim_cfg.get("algo", "AdamW"))
+    optimizer_name = _canonical_optimizer_name(optimizer_name)
+
+    if "weight_decay" in train_cfg:
+        params["weight_decay"] = float(train_cfg["weight_decay"])
+    if "betas" in train_cfg:
+        params["betas"] = tuple(train_cfg["betas"])
+
+    lr_backbone = train_cfg.get("lr_backbone", None)
+    lr_head = train_cfg.get("lr_head", None)
+
+    if lr_head is not None and hasattr(model, "get_param_groups"):
+        if lr_backbone is None:
+            lr_backbone = float(params.get("lr", lr_head))
+
+        param_groups = model.get_param_groups(
+            lr_backbone=float(lr_backbone),
+            lr_head=float(lr_head),
+            weight_decay=float(params.get("weight_decay", 0.0)),
+        )
+
+        params.pop("lr", None)
+        return optim.get_optimizer({"algo": optimizer_name, "params": params}, param_groups)
+
+    if "lr" in train_cfg:
+        params["lr"] = float(train_cfg["lr"])
+
+    return optim.get_optimizer({"algo": optimizer_name, "params": params}, model.parameters())
+
+
+def _build_scheduler(optimizer, optim_cfg, train_cfg, nepochs, steps_per_epoch):
+    scheduler_name = str(train_cfg.get("scheduler", "")).lower().strip()
+    if scheduler_name in {"cosine", "cosineannealing", "cosineannealinglr"}:
+        warmup_epochs = int(train_cfg.get("warmup_epochs", 0))
+        min_lr = float(train_cfg.get("min_lr", 1e-6))
+        warmup_start_factor = float(train_cfg.get("warmup_start_factor", 0.1))
+
+        if warmup_epochs > 0 and nepochs > warmup_epochs:
+            warmup = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=warmup_start_factor,
+                total_iters=warmup_epochs,
+            )
+            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=max(nepochs - warmup_epochs, 1),
+                eta_min=min_lr,
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup, cosine],
+                milestones=[warmup_epochs],
+            )
+            return scheduler, "epoch", None
+
+        if warmup_epochs > 0:
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=warmup_start_factor,
+                total_iters=warmup_epochs,
+            )
+            return scheduler, "epoch", None
+
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(nepochs, 1),
+            eta_min=min_lr,
+        )
+        return scheduler, "epoch", None
+
+    scheduler_cfg = optim_cfg.get("scheduler", None)
+    return optim.get_scheduler(
+        scheduler_cfg,
+        optimizer,
+        steps_per_epoch=steps_per_epoch,
+    )
+
+
+def _predict_logits_with_tta(model, inputs, metadata, tta_modes, device, amp_enabled):
+    tta_modes = list(tta_modes) if tta_modes is not None else ["orig"]
+    if len(tta_modes) == 0:
+        tta_modes = ["orig"]
+
+    use_amp = bool(amp_enabled and device.type == "cuda")
+    logits_sum = None
+    for mode in tta_modes:
+        aug_inputs = utils.apply_tta(inputs, mode)
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if use_amp
+            else contextlib.nullcontext()
+        )
+        with amp_ctx:
+            logits = utils.model_forward(model, aug_inputs, metadata)
+        logits_sum = logits if logits_sum is None else (logits_sum + logits)
+
+    return logits_sum / float(len(tta_modes))
+
+
+def _select_best_tau(
+    model,
+    loader,
+    device,
+    num_classes,
+    tau_grid,
+    class_priors,
+    amp_enabled,
+):
+    if not tau_grid:
+        return 0.0, {}
+
+    use_amp = bool(amp_enabled and device.type == "cuda")
+    model.eval()
+
+    all_logits = []
+    all_targets = []
+
+    with torch.inference_mode():
+        for batch in tqdm(loader, desc="Collect validation logits"):
+            inputs, metadata, targets = utils.unpack_supervised_batch(batch)
+            inputs = inputs.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            if metadata is not None:
+                metadata = metadata.to(device, non_blocking=True)
+
+            amp_ctx = (
+                torch.autocast(device_type="cuda", dtype=torch.float16)
+                if use_amp
+                else contextlib.nullcontext()
+            )
+            with amp_ctx:
+                logits = utils.model_forward(model, inputs, metadata)
+
+            all_logits.append(logits.detach().cpu())
+            all_targets.append(targets.detach().cpu())
+
+    if len(all_logits) == 0:
+        return 0.0, {}
+
+    logits = torch.cat(all_logits, dim=0)
+    targets = torch.cat(all_targets, dim=0)
+
+    class_priors = class_priors.detach().cpu().clamp_min(1e-12)
+    log_prior = torch.log(class_priors)
+
+    best_tau = float(tau_grid[0])
+    best_f1 = -1.0
+    tau_scores = {}
+
+    for tau in tau_grid:
+        tau = float(tau)
+        preds = torch.argmax(logits - tau * log_prior.unsqueeze(0), dim=1)
+        confusion = torch.zeros((num_classes, num_classes), dtype=torch.long)
+        utils._update_confusion_matrix(confusion, preds, targets, num_classes)
+        f1 = utils.macro_f1_from_confusion(confusion)
+        tau_scores[tau] = f1
+
+        if f1 > best_f1:
+            best_f1 = f1
+            best_tau = tau
+
+    return best_tau, tau_scores
+
+
 def train(config):
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda") if use_cuda else torch.device("cpu")
@@ -120,48 +394,58 @@ def train(config):
     seed = data_config.get("seed", 0)
     set_global_seed(seed)
 
-    # Build the dataloaders
+    nepochs = int(config.get("nepochs", train_cfg.get("epochs", train_cfg.get("nepochs", 1))))
+
     logging.info("= Building the dataloaders")
+    initial_data_cfg, _, _ = _build_epoch_data_config(
+        base_data_cfg=data_config,
+        train_cfg=train_cfg,
+        epoch_1based=1,
+    )
     train_loader, valid_loader, _, input_size, num_classes = data.get_dataloaders(
-        data_config, use_cuda
+        initial_data_cfg,
+        use_cuda,
+        build_test=False,
     )
 
-    # Build the model
+    loader_cache = {}
+    initial_loader_key = (
+        int(initial_data_cfg.get("img_size")),
+        str(initial_data_cfg.get("sampler_mode", "natural")).lower(),
+        str(initial_data_cfg.get("class_weight_formula", "balanced")),
+    )
+    loader_cache[initial_loader_key] = (train_loader, valid_loader, input_size, num_classes)
+
     logging.info("= Model")
     model = models.build_model(model_config, input_size, num_classes).to(device)
 
-    # Build loss
-    logging.info("= Loss")
-    class_weights = getattr(train_loader, "class_weights", None)
-    loss = optim.get_loss(_prepare_loss_config(config, class_weights, device), device=device)
-
-    # Build optimizer
     logging.info("= Optimizer")
-    optimizer = optim.get_optimizer(optim_config, model.parameters())
+    optimizer = _build_optimizer(model, optim_config, train_cfg)
 
-    # Build scheduler
-    scheduler_cfg = optim_config.get("scheduler", None)
-    scheduler, scheduler_step, scheduler_monitor = optim.get_scheduler(
-        scheduler_cfg,
+    logging.info("= Scheduler")
+    scheduler, scheduler_step, scheduler_monitor = _build_scheduler(
         optimizer,
-        steps_per_epoch=len(train_loader),
+        optim_config,
+        train_cfg,
+        nepochs,
+        len(train_loader),
     )
 
-    nepochs = int(config.get("nepochs", train_cfg.get("nepochs", 1)))
     amp_enabled = bool(train_cfg.get("amp", True))
-    grad_clip_norm = train_cfg.get("max_grad_norm", None)
+    grad_clip_norm = train_cfg.get("grad_clip_norm", train_cfg.get("max_grad_norm", None))
     unfreeze_backbone_epoch = train_cfg.get("unfreeze_backbone_epoch", None)
     resume_checkpoint = train_cfg.get("resume_checkpoint", None)
     resume_in_place = bool(train_cfg.get("resume_in_place", True))
     resume_strict = bool(train_cfg.get("resume_strict", True))
     resume_epoch_override = train_cfg.get("resume_epoch", None)
+    ema_decay = train_cfg.get("ema_decay", None)
 
     if resume_checkpoint is not None and not pathlib.Path(resume_checkpoint).is_file():
         raise FileNotFoundError(f"train.resume_checkpoint not found: {resume_checkpoint}")
 
     scaler = torch.cuda.amp.GradScaler(enabled=(amp_enabled and device.type == "cuda"))
+    ema = utils.ModelEMA(model, decay=float(ema_decay)) if ema_decay is not None else None
 
-    # Build the callbacks and output directory
     logname = model_config["class"]
     if resume_checkpoint is not None and resume_in_place:
         logdir = str(pathlib.Path(resume_checkpoint).parent)
@@ -175,8 +459,18 @@ def train(config):
     with open(logdir / "config.yaml", "w") as file:
         yaml.safe_dump(config, file, sort_keys=False)
 
-    # Keep summary lightweight (batch size 1 to avoid startup OOM).
-    summary_input_size = (1,) + tuple(input_size)
+    if bool(getattr(model, "expects_metadata", False)):
+        summary = torchinfo.summary(
+            model,
+            input_data=[
+                torch.zeros((1,) + tuple(input_size), device=device),
+                torch.zeros((1, 4), device=device),
+            ],
+            device=str(device),
+        )
+    else:
+        summary = torchinfo.summary(model, input_size=(1,) + tuple(input_size), device=str(device))
+
     summary_text = (
         f"Logdir : {logdir}\n"
         + "## Command \n"
@@ -184,9 +478,7 @@ def train(config):
         + "\n\n"
         + f" Config : {config} \n\n"
         + "## Summary of the model architecture\n"
-        + f"{torchinfo.summary(model, input_size=summary_input_size, device=str(device))}\n\n"
-        + "## Loss\n\n"
-        + f"{loss}\n\n"
+        + f"{summary}\n\n"
         + "## Datasets : \n"
         + f"Train : {train_loader.dataset.dataset}\n"
         + f"Validation : {valid_loader.dataset.dataset}\n"
@@ -211,20 +503,76 @@ def train(config):
             resume_checkpoint=resume_checkpoint,
             device=device,
             strict=resume_strict,
+            ema=ema,
         )
         if resume_epoch_override is not None:
             start_epoch = int(resume_epoch_override)
             logging.info(f"Using train.resume_epoch override: start_epoch={start_epoch}")
 
+    checkpoint_model = ema.ema if ema is not None else model
     model_checkpoint = utils.ModelCheckpoint(
-        model,
+        checkpoint_model,
         str(logdir / "best_model.pt"),
         min_is_best=(selection_mode == "min"),
     )
     if resumed_best_score is not None:
         model_checkpoint.best_score = resumed_best_score
 
+    current_loader_key = initial_loader_key
+
     for e in range(start_epoch, nepochs):
+        epoch_1based = e + 1
+
+        epoch_data_cfg, phase_name, phase_cfg = _build_epoch_data_config(
+            base_data_cfg=data_config,
+            train_cfg=train_cfg,
+            epoch_1based=epoch_1based,
+        )
+        loader_key = (
+            int(epoch_data_cfg.get("img_size")),
+            str(epoch_data_cfg.get("sampler_mode", "natural")).lower(),
+            str(epoch_data_cfg.get("class_weight_formula", "balanced")),
+        )
+
+        if loader_key != current_loader_key:
+            if loader_key not in loader_cache:
+                logging.info(
+                    "Switching data pipeline for epoch %s: img_size=%s sampler=%s formula=%s",
+                    epoch_1based,
+                    loader_key[0],
+                    loader_key[1],
+                    loader_key[2],
+                )
+                rebuilt_train, rebuilt_valid, _, rebuilt_input_size, rebuilt_num_classes = data.get_dataloaders(
+                    epoch_data_cfg,
+                    use_cuda,
+                    build_test=False,
+                )
+                loader_cache[loader_key] = (
+                    rebuilt_train,
+                    rebuilt_valid,
+                    rebuilt_input_size,
+                    rebuilt_num_classes,
+                )
+            train_loader, valid_loader, _, _ = loader_cache[loader_key]
+            current_loader_key = loader_key
+        else:
+            train_loader, valid_loader, _, _ = loader_cache[current_loader_key]
+
+        phase_loss = phase_cfg.get("loss", None)
+        phase_label_smoothing = phase_cfg.get("label_smoothing", None)
+        phase_use_class_weights = phase_cfg.get("use_class_weights", None)
+
+        loss_cfg = _prepare_loss_config(
+            config,
+            getattr(train_loader, "class_weights", None),
+            device,
+            loss_override=phase_loss,
+            label_smoothing_override=phase_label_smoothing,
+            use_class_weights_override=phase_use_class_weights,
+        )
+        loss = optim.get_loss(loss_cfg, device=device)
+
         if (
             unfreeze_backbone_epoch is not None
             and e == int(unfreeze_backbone_epoch)
@@ -243,10 +591,12 @@ def train(config):
             scheduler=scheduler,
             scheduler_step=scheduler_step,
             grad_clip_norm=grad_clip_norm,
+            ema=ema,
         )
 
+        eval_model = ema.ema if ema is not None else model
         val_loss, val_macro_f1 = utils.evaluate(
-            model,
+            eval_model,
             valid_loader,
             loss,
             device,
@@ -264,12 +614,13 @@ def train(config):
             if scheduler_step == "epoch":
                 scheduler.step()
             elif scheduler_step == "metric":
-                if scheduler_monitor not in metrics:
+                monitor_key = scheduler_monitor if scheduler_monitor is not None else "val_loss"
+                if monitor_key not in metrics:
                     raise ValueError(
-                        f"Scheduler monitor '{scheduler_monitor}' not found in metrics "
+                        f"Scheduler monitor '{monitor_key}' not found in metrics "
                         f"{list(metrics.keys())}"
                     )
-                scheduler.step(metrics[scheduler_monitor])
+                scheduler.step(metrics[monitor_key])
 
         if selection_metric not in metrics:
             raise ValueError(
@@ -278,22 +629,33 @@ def train(config):
 
         best_updated = model_checkpoint.update(metrics[selection_metric])
         torch.save(model.state_dict(), str(logdir / "last_model.pt"))
+        if ema is not None:
+            torch.save(ema.ema.state_dict(), str(logdir / "last_model_ema.pt"))
+
         torch.save(
             {
                 "epoch": e,
                 "best_score": model_checkpoint.best_score,
                 "model_state_dict": model.state_dict(),
+                "ema_state_dict": ema.state_dict() if ema is not None else None,
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
                 "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
                 "selection_metric": selection_metric,
+                "current_phase": phase_name,
+                "img_size": loader_key[0],
+                "sampler_mode": loader_key[1],
             },
             str(logdir / "training_state.pt"),
         )
 
         current_lr = optimizer.param_groups[0].get("lr", float("nan"))
+        phase_tag = phase_name if phase_name is not None else "default"
         logging.info(
-            f"[{e + 1}/{nepochs}] "
+            f"[{epoch_1based}/{nepochs}] "
+            f"phase={phase_tag} "
+            f"img={loader_key[0]} "
+            f"sampler={loader_key[1]} "
             f"train_loss={train_loss:.4f} "
             f"val_loss={val_loss:.4f} "
             f"val_macro_f1={val_macro_f1:.4f} "
@@ -308,8 +670,10 @@ def test(config):
 
     logging.info("= Building the dataloaders")
     data_config = config["data"]
-    _, _, test_loader, input_size, num_classes = data.get_dataloaders(
-        data_config, use_cuda
+    train_loader, valid_loader, test_loader, input_size, num_classes = data.get_dataloaders(
+        data_config,
+        use_cuda,
+        build_test=True,
     )
 
     logging.info("= Model")
@@ -325,21 +689,61 @@ def test(config):
     logging.info(f"Loading checkpoint: {ckpt_path}")
     _load_model_weights(model, ckpt_path, device=device, strict=True)
 
+    inference_cfg = config.get("inference", {})
+    tta_modes = inference_cfg.get("tta", ["orig"])
+    tau_grid = inference_cfg.get("logit_adjustment_tau_grid", [0.0])
+    use_tau_sweep = bool(inference_cfg.get("sweep_logit_adjustment", True))
+    fixed_tau = inference_cfg.get("selected_tau", None)
+    amp_enabled = bool(config.get("train", {}).get("amp", True))
+
+    class_priors = getattr(train_loader, "class_priors", None)
+    if class_priors is None:
+        class_priors = torch.ones(num_classes, dtype=torch.float32) / float(num_classes)
+
+    if fixed_tau is not None:
+        best_tau = float(fixed_tau)
+        tau_scores = {}
+        logging.info(f"Using fixed logit-adjustment tau from config: {best_tau:.3f}")
+    elif use_tau_sweep and tau_grid:
+        best_tau, tau_scores = _select_best_tau(
+            model=model,
+            loader=valid_loader,
+            device=device,
+            num_classes=num_classes,
+            tau_grid=tau_grid,
+            class_priors=class_priors,
+            amp_enabled=amp_enabled,
+        )
+        logging.info(
+            "Best validation tau=%.3f (macro-F1=%.4f)",
+            best_tau,
+            tau_scores.get(best_tau, float("nan")),
+        )
+    else:
+        best_tau = 0.0
+        tau_scores = {}
+
+    log_prior = torch.log(class_priors.to(device).clamp_min(1e-12))
+
     all_imgnames = []
     all_labels = []
 
     with torch.inference_mode():
         for batch in tqdm(test_loader, desc="Inference on test"):
-            if not (isinstance(batch, (tuple, list)) and len(batch) == 2):
-                raise ValueError(
-                    "test_loader must return (images, imgname/filename). "
-                    "Update the test dataset to include filename."
-                )
+            inputs, metadata, imgnames = utils.unpack_inference_batch(batch)
+            inputs = inputs.to(device, non_blocking=True)
+            if metadata is not None:
+                metadata = metadata.to(device, non_blocking=True)
 
-            x, imgnames = batch
-            x = x.to(device, non_blocking=True)
-
-            logits = model(x)
+            logits = _predict_logits_with_tta(
+                model=model,
+                inputs=inputs,
+                metadata=metadata,
+                tta_modes=tta_modes,
+                device=device,
+                amp_enabled=amp_enabled,
+            )
+            logits = logits - best_tau * log_prior.unsqueeze(0)
             preds = torch.argmax(logits, dim=1).detach().cpu().tolist()
 
             if torch.is_tensor(imgnames):
@@ -352,6 +756,19 @@ def test(config):
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
+
+    if tau_scores:
+        tau_report = os.path.join(out_dir if out_dir else ".", "tau_sweep.yaml")
+        with open(tau_report, "w") as f:
+            yaml.safe_dump(
+                {
+                    "selected_tau": float(best_tau),
+                    "tau_scores": {float(k): float(v) for k, v in tau_scores.items()},
+                },
+                f,
+                sort_keys=True,
+            )
+        logging.info(f"Saved tau sweep report: {tau_report}")
 
     logging.info(f"Writing submission to: {out_path}")
     with open(out_path, "w", newline="") as f:

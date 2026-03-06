@@ -2,6 +2,7 @@
 
 # Standard imports
 import contextlib
+import copy
 import os
 
 # External imports
@@ -79,6 +80,104 @@ def macro_f1_from_confusion(confusion):
     return float(f1.mean().item())
 
 
+def unpack_supervised_batch(batch):
+    if not isinstance(batch, (tuple, list)):
+        raise ValueError("Expected training/validation batch as tuple/list.")
+
+    if len(batch) == 2:
+        inputs, targets = batch
+        metadata = None
+    elif len(batch) == 3:
+        inputs, metadata, targets = batch
+    else:
+        raise ValueError(
+            "Expected supervised batch format (inputs, targets) or (inputs, metadata, targets)."
+        )
+
+    return inputs, metadata, targets
+
+
+def unpack_inference_batch(batch):
+    if not isinstance(batch, (tuple, list)):
+        raise ValueError("Expected inference batch as tuple/list.")
+
+    if len(batch) == 2:
+        inputs, names = batch
+        metadata = None
+    elif len(batch) == 3:
+        inputs, metadata, names = batch
+    else:
+        raise ValueError(
+            "Expected inference batch format (inputs, names) or (inputs, metadata, names)."
+        )
+
+    return inputs, metadata, names
+
+
+def model_forward(model, inputs, metadata=None):
+    expects_metadata = bool(getattr(model, "expects_metadata", False))
+
+    if expects_metadata:
+        if metadata is None:
+            raise ValueError("Model expects metadata but batch did not provide it.")
+        return model(inputs, metadata)
+
+    if metadata is None:
+        return model(inputs)
+
+    return model(inputs)
+
+
+def apply_tta(inputs, mode):
+    mode = str(mode).lower()
+    if mode in {"orig", "none"}:
+        return inputs
+    if mode == "hflip":
+        return torch.flip(inputs, dims=[3])
+    if mode == "vflip":
+        return torch.flip(inputs, dims=[2])
+    if mode == "rot180":
+        return torch.rot90(inputs, k=2, dims=[2, 3])
+    raise ValueError(f"Unsupported TTA mode '{mode}'")
+
+
+class ModelEMA:
+    def __init__(self, model, decay=0.9998):
+        self.decay = float(decay)
+        self.ema = copy.deepcopy(model).eval()
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model):
+        ema_state = self.ema.state_dict()
+        model_state = model.state_dict()
+
+        for key, ema_value in ema_state.items():
+            model_value = model_state[key].detach()
+            if torch.is_floating_point(ema_value):
+                ema_value.mul_(self.decay).add_(model_value, alpha=1.0 - self.decay)
+            else:
+                ema_value.copy_(model_value)
+
+    def state_dict(self):
+        return {
+            "decay": self.decay,
+            "ema_state_dict": self.ema.state_dict(),
+        }
+
+    def load_state_dict(self, state):
+        if state is None:
+            return
+
+        if "ema_state_dict" in state:
+            self.decay = float(state.get("decay", self.decay))
+            self.ema.load_state_dict(state["ema_state_dict"])
+            return
+
+        self.ema.load_state_dict(state)
+
+
 def train(
     model,
     loader,
@@ -91,6 +190,7 @@ def train(
     scheduler=None,
     scheduler_step="epoch",
     grad_clip_norm=None,
+    ema=None,
 ):
     """
     Train a model for one epoch.
@@ -103,8 +203,12 @@ def train(
     total_loss = 0.0
     num_samples = 0
 
-    for _, (inputs, targets) in (pbar := tqdm.tqdm(enumerate(loader), total=len(loader))):
-        inputs, targets = inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+    for _, batch in (pbar := tqdm.tqdm(enumerate(loader), total=len(loader))):
+        inputs, metadata, targets = unpack_supervised_batch(batch)
+        inputs = inputs.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+        if metadata is not None:
+            metadata = metadata.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -114,7 +218,7 @@ def train(
             else contextlib.nullcontext()
         )
         with amp_ctx:
-            outputs = model(inputs)
+            outputs = model_forward(model, inputs, metadata)
             loss = f_loss(outputs, targets)
 
         if scaler is not None and use_amp:
@@ -129,6 +233,9 @@ def train(
             if grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
             optimizer.step()
+
+        if ema is not None:
+            ema.update(model)
 
         if scheduler is not None and scheduler_step == "batch":
             scheduler.step()
@@ -153,9 +260,12 @@ def evaluate(model, loader, f_loss, device, *, amp_enabled=False, num_classes=No
     confusion = None
 
     with torch.inference_mode():
-        for inputs, targets in loader:
+        for batch in loader:
+            inputs, metadata, targets = unpack_supervised_batch(batch)
             inputs = inputs.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
+            if metadata is not None:
+                metadata = metadata.to(device, non_blocking=True)
 
             amp_ctx = (
                 torch.autocast(device_type="cuda", dtype=torch.float16)
@@ -163,7 +273,7 @@ def evaluate(model, loader, f_loss, device, *, amp_enabled=False, num_classes=No
                 else contextlib.nullcontext()
             )
             with amp_ctx:
-                outputs = model(inputs)
+                outputs = model_forward(model, inputs, metadata)
                 loss = f_loss(outputs, targets)
 
             preds = torch.argmax(outputs, dim=1)
