@@ -29,12 +29,12 @@ class MLPHead(nn.Module):
             nn.ReLU(inplace=True),
             nn.Dropout(p=dropout),
 
-            nn.Linear(hidden, hidden // 4),
-            nn.BatchNorm1d(hidden // 4),
+            nn.Linear(hidden, hidden // 2),
+            nn.BatchNorm1d(hidden // 2),
             nn.ReLU(inplace=True),
             nn.Dropout(p=dropout),
 
-            nn.Linear(hidden // 4, num_classes),
+            nn.Linear(hidden // 2, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

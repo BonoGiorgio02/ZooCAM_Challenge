@@ -32,10 +32,10 @@ optim:
 scheduler:
   algo: CosineAnnealingLR
   params:
-    T_max: 6
+    T_max: 7
     eta_min: 1.0e-6
 
-nepochs: 5
+nepochs: 7
 
 loss:
   name: "CrossEntropyLoss"
