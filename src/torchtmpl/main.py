@@ -43,7 +43,7 @@ def train(config):
     logging.info("= Building the dataloaders")
     data_config = config["data"]
 
-    train_loader, valid_loader, test_loader, input_size, num_classes = data.get_dataloaders(
+    train_loader, valid_loader, test_loader, input_size, num_classes, tta_transforms = data.get_dataloaders(
         data_config, use_cuda
     )
 
@@ -203,7 +203,7 @@ def test(config):
 
     logging.info("= Building the dataloaders")
     data_config = config["data"]
-    train_loader, valid_loader, test_loader, input_size, num_classes = data.get_dataloaders(
+    train_loader, valid_loader, test_loader, input_size, num_classes, tta_transforms = data.get_dataloaders(
         data_config, use_cuda
     )
 
@@ -220,32 +220,83 @@ def test(config):
 
     logging.info(f"Loading checkpoint: {ckpt_path}")
     state = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(state["model"])
+    if isinstance(state, dict) and "model" in state:
+        model.load_state_dict(state["model"])
+    else:
+        model.load_state_dict(state)
+    
+    test_cfg = config.get("test", {})
+    use_tta = test_cfg.get("use_tta", False)
+    tta_names = test_cfg.get("tta_names", ["none"])
+    tta_weights = test_cfg.get("tta_weights", None)
 
     all_imgnames = []
-    all_labels = []
 
-    with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Inference on test"):
-            if not (isinstance(batch, (tuple, list)) and len(batch) == 2):
-                raise ValueError(
-                    "test_loader must return (images, imgname/filename). "
-                    "Update the test dataset to include filename."
-                )
+    if use_tta:
+        logging.info(f"Using TTA with views: {tta_names}")
+        
+        tta_loaders = []
+        reference_dataset = None
+        
+        for name in tta_names:
+            if name not in tta_transforms:
+                raise ValueError(f"Unknown TTA transform '{name}'. Available: {list(tta_transforms.keys())}")
 
-            x, imgnames = batch
-            x = x.to(device)
+            ds = data.InferenceImageDataset(
+                root=data_config["testpath"],
+                transform=tta_transforms[name],
+            )
+            
+            if reference_dataset is None:
+                reference_dataset = ds
+            else:
+                if [p.name for p in ds.samples] != [p.name for p in reference_dataset.samples]:
+                    raise RuntimeError("TTA datasets do not have the same sample ordering.")
 
-            logits = model(x)
-            preds = torch.argmax(logits, dim=1)
+            dl = torch.utils.data.DataLoader(
+                ds,
+                batch_size=data_config.get("batch_size", 64),
+                shuffle=False,
+                num_workers=data_config.get("num_workers", 4),
+                pin_memory=use_cuda,
+            )
+            tta_loaders.append(dl)
+            
+        probs = utils.predict_proba_tta(model, tta_loaders, device, weights=tta_weights)
+        preds = probs.argmax(dim=1).cpu().tolist()
+        all_imgnames = [p.name for p in reference_dataset.samples]
+    
+    else:
+        logging.info("Using standard test inference without TTA")
 
-            preds = preds.detach().cpu().tolist()
+        probs = utils.predict_proba(model, test_loader, device)
+        preds = probs.argmax(dim=1).cpu().tolist()
 
-            if torch.is_tensor(imgnames):
-                imgnames = imgnames.detach().cpu().tolist()
+        for p in test_loader.dataset.samples:
+            all_imgnames.append(p.name)
 
-            all_imgnames.extend(list(imgnames))
-            all_labels.extend(preds)
+
+    # with torch.no_grad():
+    #     for batch in tqdm(test_loader, desc="Inference on test"):
+    #         if not (isinstance(batch, (tuple, list)) and len(batch) == 2):
+    #             raise ValueError(
+    #                 "test_loader must return (images, imgname/filename). "
+    #                 "Update the test dataset to include filename."
+    #             )
+
+    #         x, imgnames = batch
+    #         x = x.to(device)
+
+    #         logits = model(x)
+    #         preds = torch.argmax(logits, dim=1)
+
+    #         preds = preds.detach().cpu().tolist()
+
+    #         if torch.is_tensor(imgnames):
+    #             imgnames = imgnames.detach().cpu().tolist()
+
+    #         all_imgnames.extend(list(imgnames))
+    #         all_labels.extend(preds)
 
     out_path = config.get("output", {}).get("submission_path", "submission.csv")
     logging.info(f"Writing submission to: {out_path}")
@@ -253,7 +304,7 @@ def test(config):
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["imgname", "label"])
-        for name, lab in zip(all_imgnames, all_labels):
+        for name, lab in zip(all_imgnames, preds):
             name = os.path.basename(str(name))
             writer.writerow([name, int(lab)])
 

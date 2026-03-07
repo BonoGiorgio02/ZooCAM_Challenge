@@ -6,6 +6,9 @@ data:
   valid_ratio: 0.1
   seed: 42
 
+  mean: 0.886471
+  std: 0.208829
+
   img_size: 192
   to_rgb: true
   pad_fill: 255
@@ -14,6 +17,11 @@ data:
     compute_analysis: false
     out_dir: './analysis'
     compute_percentiles: true
+
+  sampler:
+    enabled: true
+    alpha: 0.3
+    max_weight: 5.0
 
 optim:
   algo: AdamW
@@ -52,7 +60,10 @@ train:
   # checkpoint: "./logs/ResNetClassifier50_/best_model.pt"
 
 test:
-  checkpoint: "./logs/ResNetClassifier50_1/best_model.pt" 
+  checkpoint: "./logs/ResNetClassifier50_1/best_model.pt"
+  use_tta: true
+  tta_names: ["none", "rot90", "rot180", "rot270"]
+  tta_weights: null
 
 output:
   submission_path: "./submission.csv"

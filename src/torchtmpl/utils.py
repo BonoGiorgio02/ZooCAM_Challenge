@@ -100,7 +100,7 @@ def train(model, loader, f_loss, optimizer, device, dynamic_display=True, wandb_
     total_loss = 0
     num_samples = 0
     
-    pbar = tqdm.tqdm(enumerate(loader), desc="Train", leave=False)
+    pbar = tqdm.tqdm(enumerate(loader), desc="Train")
     
     for i, (inputs, targets) in pbar:
 
@@ -150,7 +150,7 @@ def test(model, loader, f_loss, device):
     total_loss = 0
     num_samples = 0
     
-    pbar = tqdm.tqdm(enumerate(loader), desc="Val", leave=False)
+    pbar = tqdm.tqdm(enumerate(loader), desc="Val")
     
     for i, (inputs, targets) in pbar:
 
@@ -169,3 +169,47 @@ def test(model, loader, f_loss, device):
         pbar.set_postfix(loss=f"{total_loss/num_samples:.4f}")
 
     return total_loss / num_samples
+
+
+@torch.no_grad()
+def predict_proba(model, loader, device):
+    model.eval()
+
+    all_probs = []
+
+    pbar = tqdm.tqdm(loader, desc="Predict")
+
+    for batch in pbar:
+        if isinstance(batch, (list, tuple)) and len(batch) == 2:
+            inputs = batch[0]
+        else:
+            inputs = batch
+
+        inputs = inputs.to(device)
+        outputs = model(inputs)
+        probs = torch.softmax(outputs, dim=1)
+        all_probs.append(probs.cpu())
+
+    return torch.cat(all_probs, dim=0)
+
+
+@torch.no_grad()
+def predict_proba_tta(model, loaders, device, weights=None):
+    model.eval()
+
+    if weights is None:
+        weights = [1.0 / len(loaders)] * len(loaders)
+
+    assert len(weights) == len(loaders), "weights and loaders must have same length"
+
+    final_probs = None
+
+    for w, loader in zip(weights, loaders):
+        probs = predict_proba(model, loader, device)
+
+        if final_probs is None:
+            final_probs = w * probs
+        else:
+            final_probs += w * probs
+
+    return final_probs

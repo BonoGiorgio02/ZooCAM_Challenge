@@ -15,6 +15,7 @@ from torchvision import transforms
 from torchvision.transforms import v2
 from torchvision.datasets import ImageFolder
 import torchvision.transforms.functional as F
+from torch.utils.data import WeightedRandomSampler
 from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
 
 import numpy as np
@@ -167,6 +168,97 @@ def build_train_val_transforms(img_size=128, to_rgb=True, pad_fill=255):
 
     return train_tf, val_tf
 
+def build_tta_transforms(
+    img_size=128,
+    to_rgb=True,
+    pad_fill=255,
+    mean=0.886471,
+    std=0.208829,
+):
+    mean = [mean]*3 if to_rgb else [mean]
+    std = [std]*3 if to_rgb else [std]
+    fill = (pad_fill, pad_fill, pad_fill) if to_rgb else pad_fill
+
+    base = [
+        v2.ToImage(),
+        v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+        PadToSquare(fill=fill),
+        v2.Resize((img_size, img_size), antialias=True),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=mean, std=std),
+    ]
+
+    return {
+        "none": v2.Compose(base),
+        "hflip": v2.Compose([
+            v2.ToImage(),
+            v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+            PadToSquare(fill=fill),
+            v2.Resize((img_size, img_size), antialias=True),
+            v2.RandomHorizontalFlip(p=1.0),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=mean, std=std),
+        ]),
+        "vflip": v2.Compose([
+            v2.ToImage(),
+            v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+            PadToSquare(fill=fill),
+            v2.Resize((img_size, img_size), antialias=True),
+            v2.RandomVerticalFlip(p=1.0),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=mean, std=std),
+        ]),
+        "rot90": v2.Compose([
+            v2.ToImage(),
+            v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+            PadToSquare(fill=fill),
+            v2.Resize((img_size, img_size), antialias=True),
+            v2.RandomRotation(degrees=(90, 90), fill=fill),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=mean, std=std),
+        ]),
+        "rot180": v2.Compose([
+            v2.ToImage(),
+            v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+            PadToSquare(fill=fill),
+            v2.Resize((img_size, img_size), antialias=True),
+            v2.RandomRotation(degrees=(180, 180), fill=fill),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=mean, std=std),
+        ]),
+        "rot270": v2.Compose([
+            v2.ToImage(),
+            v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+            PadToSquare(fill=fill),
+            v2.Resize((img_size, img_size), antialias=True),
+            v2.RandomRotation(degrees=(270, 270), fill=fill),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=mean, std=std),
+        ]),
+    }
+
+
+def build_weighted_sampler_from_subset(train_full, train_indices, alpha=0.5, max_weight=None):
+    labels_full = np.array([y for _, y in train_full.samples])
+    subset_labels = labels_full[train_indices]
+
+    class_counts = np.bincount(subset_labels)
+    class_weights = 1.0 / np.power(class_counts, alpha)
+
+    class_weights = class_weights / class_weights.mean()
+
+    if max_weight is not None:
+        class_weights = np.clip(class_weights, None, max_weight)
+
+    sample_weights = class_weights[subset_labels]
+
+    sampler = WeightedRandomSampler(
+        weights=torch.as_tensor(sample_weights, dtype=torch.double),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+    return sampler
+
 
 def build_datasets(data_config):
     """
@@ -204,9 +296,17 @@ def get_dataloaders(data_config, use_cuda):
     to_rgb = data_config.get("to_rgb", True)
     pad_fill = data_config.get("pad_fill", 255)
     
+    sampler_cfg = data_config.get("sampler", {})
+    use_weighted_sampling = sampler_cfg.get("enabled", False)
+    sampler_alpha = sampler_cfg.get("alpha", 0.3)
+    sampler_max_weight = sampler_cfg.get("max_weight", None)
+    
     # --- Analysis step (one-shot)
     analysis_cfg = data_config.get("analysis", {})  # optionally nested under data
     analysis_enabled = analysis_cfg.get("compute_analysis", False)
+    
+    mean = [0.886471]*3 if to_rgb else [0.886471]
+    std  = [0.208829]*3 if to_rgb else [0.208829]
     
     if analysis_enabled:
         # Build base datasets without transforms
@@ -230,19 +330,11 @@ def get_dataloaders(data_config, use_cuda):
     else:
         logging.info("  - Dataset analysis disabled (set data.analysis.enabled=true to run it)")
 
-    # TODO: Improve data augmentation with other v2 transforms
-    # Baseline transforms 
     train_transform, val_transform = build_train_val_transforms(
         img_size=img_size,
         to_rgb=to_rgb,
         pad_fill=pad_fill,
     )
-    
-    input_transform = transforms.Compose([
-        transforms.Grayscale(),
-        transforms.Resize((128, 128)),
-        transforms.ToTensor()
-    ])
     
     train_full = ImageFolder(root=data_config["trainpath"], transform=train_transform)
     val_full = ImageFolder(root=data_config["trainpath"], transform=val_transform)
@@ -264,12 +356,30 @@ def get_dataloaders(data_config, use_cuda):
     
     train_dataset = torch.utils.data.Subset(train_full, train_indices)
     valid_dataset = torch.utils.data.Subset(val_full, valid_indices)
+    
+    train_sampler = None
+    train_shuffle = True
+
+    if use_weighted_sampling:
+        train_sampler = build_weighted_sampler_from_subset(
+            train_full=train_full,
+            train_indices=train_indices,
+            alpha=sampler_alpha,
+            max_weight=sampler_max_weight,
+        )
+        train_shuffle = False
+        logging.info(
+            f"  - Using weighted sampler: alpha={sampler_alpha}, max_weight={sampler_max_weight}"
+        )
+    else:
+        logging.info("  - Using standard shuffled sampling")
 
     # Build the dataloaders
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=train_shuffle,
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=use_cuda,
     )
@@ -292,5 +402,13 @@ def get_dataloaders(data_config, use_cuda):
 
     num_classes = len(train_full.classes)
     input_size = tuple(train_full[0][0].shape)
+    
+    tta_transforms = build_tta_transforms(
+        img_size=img_size,
+        to_rgb=to_rgb,
+        pad_fill=pad_fill,
+        mean=mean,
+        std=std,
+    )
 
-    return train_loader, valid_loader, test_loader, input_size, num_classes
+    return train_loader, valid_loader, test_loader, input_size, num_classes, tta_transforms
