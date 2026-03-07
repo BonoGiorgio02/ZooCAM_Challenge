@@ -149,7 +149,7 @@ cfg.setdefault("logging", {{}})
 cfg["logging"]["logdir"] = run_dir
 cfg["checkpoint"] = best_path
 
-cfg.setdefault("checkpointing", {})
+cfg.setdefault("checkpointing", {{}})
 cfg["checkpointing"]["dir"] = run_dir
 cfg["checkpointing"]["best_path"] = best_path
 cfg["checkpointing"]["last_path"] = last_path
