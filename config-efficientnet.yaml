@@ -37,10 +37,7 @@ scheduler:
 
 nepochs: 7
 
-loss:
-  name: "CrossEntropyLoss"
-  params:
-    label_smoothing: 0.0
+loss: "CrossEntropyLoss"
 
 logging:
   logdir: "./logs"
