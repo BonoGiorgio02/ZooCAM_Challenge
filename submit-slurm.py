@@ -71,20 +71,22 @@ cd "$TMPBASE/code"
 echo "Checkout commit {commit_id}"
 git checkout {commit_id}
 
-echo "Setting up virtual environment"
-python3 -m venv venv
-source venv/bin/activate
-python -m pip install --upgrade pip
+echo "Setting up DCE virtual environment"
 
-# Numpy Fix
-python -m pip install "numpy<2"
+/opt/dce/dce_venv.sh /mounts/datasets/venvs/torch-2.7.1 $TMPDIR/venv
+source $TMPDIR/venv/bin/activate
 
-{torch_block}
+echo "Python version:"
+python --version
 
-# install your package
+echo "Torch version:"
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+
+# install your package in editable mode
 python -m pip install -e .
 
-python -m pip install "numpy<2"
+# alcune dipendenze utili
+python -m pip install wandb pyyaml
 
 # ====
 # WANDB SETUP
