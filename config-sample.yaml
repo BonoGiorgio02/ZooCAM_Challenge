@@ -27,7 +27,7 @@ scheduler:
     T_max: 6
     eta_min: 1.0e-6
 
-nepochs: 15
+nepochs: 5
 loss: "CrossEntropyLoss"
 
 logging:
@@ -49,10 +49,10 @@ train:
   resume: false
   checkpoint: ""
   # resume: true
-  # checkpoint: "./logs/ResNetClassifier_0/best_model.pt"
+  # checkpoint: "./logs/ResNetClassifier50_/best_model.pt"
 
 test:
-  checkpoint: "./logs/ResNetClassifier_0/best_model.pt" 
+  checkpoint: "./logs/ResNetClassifier50_1/best_model.pt" 
 
 output:
   submission_path: "./submission.csv"

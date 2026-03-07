@@ -12,7 +12,7 @@ def makejob(commit_id, configpath, nruns):
 #SBATCH --job-name=templatecode
 #SBATCH --nodes=1
 #SBATCH --partition=gpu_prod_long
-#SBATCH --time=2:00:00
+#SBATCH --time=10:00:00
 #SBATCH --output=logslurms/slurm-%A_%a.out
 #SBATCH --error=logslurms/slurm-%A_%a.err
 #SBATCH --array=1-{nruns}
@@ -35,14 +35,26 @@ git checkout {commit_id}
 
 
 echo "Setting up the virtual environment"
-python3 -m venv venv
-source venv/bin/activate
+/opt/dce/dce_venv.sh /mounts/datasets/venvs/torch-2.7.1 $TMPDIR/venv
+source $TMPDIR/venv/bin/activate
 
 # Install the library
 python -m pip install .
 
 echo "Training"
 python -m torchtmpl.main {configpath} train
+
+# MODIFICATION : On stocke le code de sortie pour rapatrier les logs MÊME si ça a planté
+TRAIN_EXIT_CODE=$?
+ 
+# =========================================================
+# NOUVEAU : RAPATRIEMENT DES LOGS ET MODÈLES
+# =========================================================
+echo "Retrieving logs from the compute node..."
+mkdir -p $current_dir/logs
+# On renvoie tout le dossier logs du GPU vers ton dossier d'origine
+rsync -avz logs/ $current_dir/logs/
+# =========================================================
 
 if [[ $? != 0 ]]; then
     exit -1
