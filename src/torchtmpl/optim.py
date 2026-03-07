@@ -6,7 +6,7 @@ import torch.nn as nn
 
 
 def get_loss(lossname):
-    return eval(f"nn.{lossname}(label_smoothing=0.1)")
+    return eval(f"nn.{lossname}(label_smoothing=0.05)")
 
 
 def get_optimizer(cfg, params):

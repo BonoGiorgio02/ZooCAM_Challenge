@@ -145,7 +145,7 @@ def train(config):
     model_checkpoint = utils.ModelCheckpoint(
         model,
         str(logdir / "best_model.pt"),
-        min_is_best=True,
+        min_is_best=False,
         optimizer=optimizer,
         scheduler=scheduler,
     )
@@ -159,36 +159,39 @@ def train(config):
         train_loss = utils.train(model, train_loader, loss, optimizer, device, wandb_log=wandb_log)
 
         # Test
-        test_loss = utils.test(model, valid_loader, loss, device)
+        test_loss, val_macro_f1 = utils.test(model, valid_loader, loss, device)
         
         # Step the scheduler
         if scheduler is not None:
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(test_loss)  # plateau needs a metric
+                scheduler.step(val_macro_f1)  # plateau needs a metric
             else:
                 scheduler.step()
                 
         current_lr = optimizer.param_groups[0]["lr"]
         logging.info(f"LR: {current_lr:.2e}")
 
-        updated = model_checkpoint.update(test_loss, epoch=e)
+        updated = model_checkpoint.update(val_macro_f1, epoch=e)
         logging.info(
-            "[%d/%d] Test loss : %.3f %s"
+            "[%d/%d] Val loss: %.3f | Val macro F1: %.4f %s"
             % (
                 e,
                 config["nepochs"],
                 test_loss,
+                val_macro_f1,
                 "[>> BETTER <<]" if updated else "",
             )
         )
 
         # Update the dashboard
         metrics = {
-        "epoch": e,
-        "train_loss": train_loss,
-        "val_loss": test_loss,
-        "lr": current_lr,
+            "epoch": e,
+            "train_loss": train_loss,
+            "val_loss": test_loss,
+            "val_macro_f1": val_macro_f1,
+            "lr": current_lr,
         }
+        
         if wandb_log is not None:
             logging.info("Logging on wandb")
             wandb_log(metrics)

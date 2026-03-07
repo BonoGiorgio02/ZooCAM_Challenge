@@ -7,6 +7,7 @@ import os
 import torch
 import torch.nn
 import tqdm
+from sklearn.metrics import f1_score
 
 
 def generate_unique_logpath(logdir, raw_run_name):
@@ -147,28 +148,36 @@ def test(model, loader, f_loss, device):
     # This is important for layers such as dropout, batchnorm, ...
     model.eval()
 
-    total_loss = 0
+    total_loss = 0.0
     num_samples = 0
-    
-    pbar = tqdm.tqdm(enumerate(loader), desc="Val")
-    
-    for i, (inputs, targets) in pbar:
 
-        inputs, targets = inputs.to(device), targets.to(device)
+    all_targets = []
+    all_preds = []
 
-        # Compute the forward propagation
-        outputs = model(inputs)
+    pbar = tqdm.tqdm(enumerate(loader), total=len(loader), desc="Val")
 
-        loss = f_loss(outputs, targets)
+    with torch.no_grad():
+        for i, (inputs, targets) in pbar:
+            inputs, targets = inputs.to(device), targets.to(device)
 
-        # Update the metrics
-        # We here consider the loss is batch normalized
-        total_loss += inputs.shape[0] * loss.item()
-        num_samples += inputs.shape[0]
-        
-        pbar.set_postfix(loss=f"{total_loss/num_samples:.4f}")
+            outputs = model(inputs)
+            loss = f_loss(outputs, targets)
 
-    return total_loss / num_samples
+            total_loss += inputs.shape[0] * loss.item()
+            num_samples += inputs.shape[0]
+
+            preds = torch.argmax(outputs, dim=1)
+
+            all_targets.extend(targets.cpu().tolist())
+            all_preds.extend(preds.cpu().tolist())
+
+            current_loss = total_loss / num_samples
+            pbar.set_postfix(loss=f"{current_loss:.4f}")
+
+    val_loss = total_loss / num_samples
+    macro_f1 = f1_score(all_targets, all_preds, average="macro")
+
+    return val_loss, macro_f1
 
 
 @torch.no_grad()
