@@ -1,69 +1,116 @@
 data:
   trainpath: '/mounts/datasets/datasets/2025-ZooCamChallenge/train'
   testpath: '/mounts/datasets/datasets/2025-ZooCamChallenge/test'
-  batch_size: 64
-  num_workers: 4
+  batch_size: 128
+  num_workers: 8
   valid_ratio: 0.1
   seed: 42
 
-  mean: 0.886471
-  std: 0.208829
+  grayscale_to_rgb: repeat_3_channels
+  keep_aspect_ratio: true
+  pad_to_square: true
+  pad_value: 0
+  normalize: imagenet
+  return_metadata: true
 
-  img_size: 192
-  to_rgb: true
-  pad_fill: 255
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last_train: false
 
-  analysis:
-    compute_analysis: false
-    out_dir: './analysis'
-    compute_percentiles: true
+  img_size: 224
+  progressive_resize:
+    - epochs: [1, 2]
+      image_size: 224
+    - epochs: [3, 12]
+      image_size: 256
+    - epochs: [13, 16]
+      image_size: 288
 
-  sampler:
-    enabled: true
-    alpha: 0.3
-    max_weight: 5.0
+  train_augment:
+    hflip_p: 0.5
+    vflip_p: 0.5
+    affine_p: 0.7
+    rotate_deg: 180
+    translate: [0.05, 0.05]
+    scale: [0.90, 1.10]
+    shear_deg: 7
+    brightness: 0.10
+    contrast: 0.10
+    random_erasing_p: 0.15
 
 optim:
   algo: AdamW
   params:
-    lr: 0.0001
-    weight_decay: 0.01
+    lr: 0.001
+    betas: [0.9, 0.999]
+    eps: 1.0e-08
+    weight_decay: 0.05
 
-scheduler:
-  algo: CosineAnnealingLR
+loss:
+  name: CrossEntropyLoss
   params:
-    T_max: 6
-    eta_min: 1.0e-6
-
-nepochs: 5
-loss: "CrossEntropyLoss"
-
-logging:
-  logdir: "./logs"
-  wandb:
-    project: "ZooCamChallenge"
-    entity: null
-
-model:
-  class: ResNetClassifier
-  name: "resnet50"
-  pretrained: true
-  freeze_backbone: false
-  unfreeze_layer4: true
-  head_hidden: 1024
-  head_dropout: 0.2
+    label_smoothing: 0.05
 
 train:
-  resume: false
-  checkpoint: ""
-  # resume: true
-  # checkpoint: "./logs/ResNetClassifier50_/best_model.pt"
+  epochs: 16
+  optimizer: adamw
+  lr_backbone: 3.0e-04
+  lr_head: 1.0e-03
+  weight_decay: 0.05
+  betas: [0.9, 0.999]
+  scheduler: cosine
+  warmup_epochs: 1
+  min_lr: 1.0e-06
+  amp: true
+  grad_clip_norm: 1.0
+  ema_decay: 0.9998
+
+  selection_metric: val_macro_f1
+  selection_mode: max
+  use_class_weights: false
+
+  resume_checkpoint: "./logs/ConvNeXtTinyMeta_2/training_state.pt"
+  resume_in_place: false
+  resume_strict: true
+  resume_epoch: null
+  unfreeze_backbone_epoch: null
+
+  phase1:
+    epochs: [1, 12]
+    sampler: natural
+    loss: cross_entropy
+    label_smoothing: 0.05
+
+  phase2:
+    epochs: [13, 16]
+    sampler: weighted_random
+    class_weight_formula: 1 / sqrt(class_count)
+    loss: cross_entropy
+    label_smoothing: 0.0
+
+logging:
+  logdir: './logs'
+
+model:
+  class: ConvNeXtTinyMeta
+  backbone: convnext_tiny.fb_in22k_ft_in1k
+  pretrained: true
+  num_classes: 86
+  meta_features: [log1p_h, log1p_w, log1p_area, log_aspect]
+  meta_mlp_dims: [64, 128]
+  fusion_hidden_dim: 256
+  head_dropout: 0.30
+  meta_dropout: 0.10
+  freeze_backbone: false
 
 test:
-  checkpoint: "./logs/ResNetClassifier50_1/best_model.pt"
-  use_tta: true
-  tta_names: ["none", "rot90", "rot180", "rot270"]
-  tta_weights: null
+  checkpoint: './logs/ConvNeXtTinyMeta_0/best_model.pt'
+
+inference:
+  tta: [orig, hflip, vflip, rot180]
+  logit_adjustment_tau_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  sweep_logit_adjustment: true
 
 output:
-  submission_path: "./submission.csv"
+  submission_path: './outputs/submission_convnext_tiny_meta.csv'

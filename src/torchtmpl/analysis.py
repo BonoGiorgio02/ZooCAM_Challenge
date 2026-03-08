@@ -29,7 +29,7 @@ def _safe_image_size(path: str) -> Optional[Tuple[int, int]]:
     """Return (w, h) or None if the image cannot be opened."""
     try:
         with Image.open(path) as im:
-            return im.size  # (w, h)
+            return im.size
     except Exception:
         return None
 

@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 
 # External imports
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torchvision
 import torch.nn as nn
@@ -26,13 +28,15 @@ from sklearn.model_selection import train_test_split
 from . import analysis
 
 class InferenceImageDataset(torch.utils.data.Dataset):
-    """Dataset for unlabeled inference that returns (image_tensor, filename)."""
+    """Dataset for unlabeled inference returning filename with optional metadata."""
 
-    def __init__(self, root, transform=None):
+    def __init__(self, root, transform=None, return_metadata=False):
         self.root = Path(root)
         self.transform = transform
+        self.return_metadata = bool(return_metadata)
+        valid_exts = {ext.lower() for ext in IMG_EXTENSIONS}
         self.samples = sorted(
-            p for p in self.root.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTENSIONS
+            p for p in self.root.rglob("*") if p.is_file() and p.suffix.lower() in valid_exts
         )
 
         if len(self.samples) == 0:
@@ -44,8 +48,18 @@ class InferenceImageDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         path = self.samples[idx]
         img = default_loader(str(path))
+
+        if self.return_metadata:
+            width, height = img.size
+            metadata = _compute_size_metadata(height=height, width=width)
+        else:
+            metadata = None
+
         if self.transform is not None:
             img = self.transform(img)
+
+        if self.return_metadata:
+            return img, metadata, path.name
         return img, path.name
 
 
@@ -374,30 +388,61 @@ def get_dataloaders(data_config, use_cuda):
     else:
         logging.info("  - Using standard shuffled sampling")
 
-    # Build the dataloaders
-    train_loader = torch.utils.data.DataLoader(
+    imbalance_cfg = data_config.get("imbalance", {})
+    sampler_mode = str(data_config.get("sampler_mode", "")).lower().strip()
+    if not sampler_mode:
+        sampler_mode = "weighted_random" if imbalance_cfg.get("use_weighted_sampler", False) else "natural"
+
+    class_weight_formula = data_config.get(
+        "class_weight_formula",
+        imbalance_cfg.get("class_weight_formula", "balanced"),
+    )
+    compute_class_weights = data_config.get(
+        "compute_class_weights",
+        imbalance_cfg.get("compute_class_weights", True),
+    )
+
+    train_sampler = None
+    if sampler_mode == "weighted_random":
+        sampling_weights = _compute_sampling_class_weights(class_counts, class_weight_formula)
+        sample_weights = sampling_weights[train_labels]
+        train_sampler = torch.utils.data.WeightedRandomSampler(
+            weights=torch.as_tensor(sample_weights, dtype=torch.double),
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        logging.info(
+            "  - Using WeightedRandomSampler with class_weight_formula=%s",
+            class_weight_formula,
+        )
+    elif sampler_mode != "natural":
+        raise ValueError("data.sampler_mode must be one of: natural, weighted_random")
+
+    train_loader = _build_loader(
         train_dataset,
         batch_size=batch_size,
         shuffle=train_shuffle,
         sampler=train_sampler,
         num_workers=num_workers,
-        pin_memory=use_cuda,
+        pin_memory=pin_memory,
+        seed=seed,
+        drop_last=drop_last_train,
+        sampler=train_sampler,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
 
-    valid_loader = torch.utils.data.DataLoader(
+    valid_loader = _build_loader(
         valid_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=use_cuda,
-    )
-    
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=use_cuda,
+        pin_memory=pin_memory,
+        seed=seed + 1,
+        drop_last=False,
+        sampler=None,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
 
     num_classes = len(train_full.classes)
