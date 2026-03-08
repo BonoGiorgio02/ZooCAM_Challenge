@@ -93,9 +93,69 @@ def test_convnext_tiny_meta():
     print(f"Output tensor of size : {output.shape}")
 
 
+def test_efficientnet_classifier():
+    cfg = {
+        "class": "EfficientNetClassifier",
+        "name": "efficientnet_b0",
+        "pretrained": False,
+        "freeze_backbone": False,
+    }
+    input_size = (3, 224, 224)
+    batch_size = 2
+    num_classes = 18
+    model = build_model(cfg, input_size, num_classes)
+
+    input_tensor = torch.randn(batch_size, *input_size)
+    output = model(input_tensor)
+    expected_output_size = (batch_size, num_classes)
+    assert expected_output_size == output.shape
+    print(f"Output tensor of size : {output.shape}")
+
+
+def test_convnext_classifier():
+    cfg = {
+        "class": "ConvNeXtClassifier",
+        "name": "convnext_tiny",
+        "pretrained": False,
+        "freeze_backbone": False,
+    }
+    input_size = (3, 224, 224)
+    batch_size = 2
+    num_classes = 18
+    model = build_model(cfg, input_size, num_classes)
+
+    input_tensor = torch.randn(batch_size, *input_size)
+    output = model(input_tensor)
+    expected_output_size = (batch_size, num_classes)
+    assert expected_output_size == output.shape
+    print(f"Output tensor of size : {output.shape}")
+
+
+def test_resnet_classifier():
+    cfg = {
+        "class": "ResNetClassifier",
+        "name": "resnet18",
+        "pretrained": False,
+        "freeze_backbone": False,
+    }
+    input_size = (3, 224, 224)
+    batch_size = 2
+    num_classes = 18
+    model = build_model(cfg, input_size, num_classes)
+
+    input_tensor = torch.randn(batch_size, *input_size)
+    output = model(input_tensor)
+    expected_output_size = (batch_size, num_classes)
+    assert expected_output_size == output.shape
+    print(f"Output tensor of size : {output.shape}")
+
+
 if __name__ == "__main__":
     test_linear()
     test_cnn()
     test_resnet()
     test_torchvision_resnet()
     test_convnext_tiny_meta()
+    test_efficientnet_classifier()
+    test_convnext_classifier()
+    test_resnet_classifier()

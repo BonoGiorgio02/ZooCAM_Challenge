@@ -48,7 +48,7 @@ logging:
 model:
   class: EfficientNetClassifier
   name: "efficientnet_b3"
-  pretrained: true
+  pretrained: false
   freeze_backbone: false
   unfreeze_last_n: 2
   head_hidden: 512
@@ -65,4 +65,4 @@ test:
   tta_weights: null
 
 output:
-  submission_path: "./submission.csv"
+  submission_path: "./outputs/submission_efficientnet.csv"
