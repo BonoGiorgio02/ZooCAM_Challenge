@@ -8,7 +8,11 @@ import os
 # External imports
 import torch
 import torch.nn
+import torch.nn.functional as F
 import tqdm
+
+_IMAGENET_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 def generate_unique_logpath(logdir, raw_run_name):
@@ -128,21 +132,189 @@ def model_forward(model, inputs, metadata=None):
     return model(inputs)
 
 
-def apply_tta(inputs, mode):
-    mode = str(mode).lower()
-    if mode in {"orig", "none"}:
+def _expand_norm_values(values, channels):
+    if values is None:
+        return None
+    if isinstance(values, (int, float)):
+        return [float(values)] * int(channels)
+    if isinstance(values, (list, tuple)):
+        parsed = [float(v) for v in values]
+        if len(parsed) == channels:
+            return parsed
+        if len(parsed) == 1:
+            return parsed * int(channels)
+    raise ValueError(
+        f"Invalid normalization stats for TTA (expected scalar or list of length 1/{channels})."
+    )
+
+
+def _apply_color_jitter_on_normalized(
+    inputs,
+    brightness=1.0,
+    contrast=1.0,
+    norm_mean=None,
+    norm_std=None,
+):
+    if inputs.ndim != 4:
+        raise ValueError(f"Expected BCHW tensor for TTA, got shape {tuple(inputs.shape)}")
+
+    channels = int(inputs.shape[1])
+    resolved_mean = _expand_norm_values(norm_mean, channels)
+    resolved_std = _expand_norm_values(norm_std, channels)
+    if resolved_mean is None:
+        resolved_mean = _expand_norm_values(_IMAGENET_MEAN, channels)
+    if resolved_std is None:
+        resolved_std = _expand_norm_values(_IMAGENET_STD, channels)
+
+    mean = inputs.new_tensor(resolved_mean).view(1, channels, 1, 1)
+    std = inputs.new_tensor(resolved_std).view(1, channels, 1, 1)
+
+    x = inputs * std + mean
+    x = x.clamp(0.0, 1.0)
+
+    if float(brightness) != 1.0:
+        x = x * float(brightness)
+    if float(contrast) != 1.0:
+        x_mean = x.mean(dim=(2, 3), keepdim=True)
+        x = (x - x_mean) * float(contrast) + x_mean
+
+    x = x.clamp(0.0, 1.0)
+    return (x - mean) / std
+
+
+def _build_gaussian_kernel2d(kernel_size, sigma, device, dtype):
+    radius = kernel_size // 2
+    coords = torch.arange(-radius, radius + 1, device=device, dtype=dtype)
+    kernel_1d = torch.exp(-0.5 * (coords / float(sigma)) ** 2)
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel_2d = torch.outer(kernel_1d, kernel_1d)
+    kernel_2d = kernel_2d / kernel_2d.sum()
+    return kernel_2d
+
+
+def _apply_gaussian_blur_on_normalized(
+    inputs,
+    sigma=0.5,
+    kernel_size=3,
+    norm_mean=None,
+    norm_std=None,
+):
+    if inputs.ndim != 4:
+        raise ValueError(f"Expected BCHW tensor for TTA, got shape {tuple(inputs.shape)}")
+    if kernel_size % 2 == 0 or kernel_size < 3:
+        raise ValueError("Gaussian blur kernel_size must be an odd integer >= 3.")
+
+    channels = int(inputs.shape[1])
+    resolved_mean = _expand_norm_values(norm_mean, channels)
+    resolved_std = _expand_norm_values(norm_std, channels)
+    if resolved_mean is None:
+        resolved_mean = _expand_norm_values(_IMAGENET_MEAN, channels)
+    if resolved_std is None:
+        resolved_std = _expand_norm_values(_IMAGENET_STD, channels)
+
+    mean = inputs.new_tensor(resolved_mean).view(1, channels, 1, 1)
+    std = inputs.new_tensor(resolved_std).view(1, channels, 1, 1)
+
+    x = inputs * std + mean
+    x = x.clamp(0.0, 1.0)
+
+    kernel_2d = _build_gaussian_kernel2d(
+        kernel_size=kernel_size,
+        sigma=max(float(sigma), 1e-3),
+        device=x.device,
+        dtype=x.dtype,
+    )
+    kernel = kernel_2d.view(1, 1, kernel_size, kernel_size).repeat(channels, 1, 1, 1)
+    x = F.conv2d(x, weight=kernel, bias=None, stride=1, padding=kernel_size // 2, groups=channels)
+    x = x.clamp(0.0, 1.0)
+    return (x - mean) / std
+
+
+def _apply_single_tta_token(inputs, token, norm_mean=None, norm_std=None):
+    if token in {"orig", "none"}:
         return inputs
-    if mode == "hflip":
+    if token == "hflip":
         return torch.flip(inputs, dims=[3])
-    if mode == "vflip":
+    if token == "vflip":
         return torch.flip(inputs, dims=[2])
-    if mode == "rot90":
+    if token == "rot90":
         return torch.rot90(inputs, k=1, dims=[2, 3])
-    if mode == "rot180":
+    if token == "rot180":
         return torch.rot90(inputs, k=2, dims=[2, 3])
-    if mode == "rot270":
+    if token == "rot270":
         return torch.rot90(inputs, k=3, dims=[2, 3])
-    raise ValueError(f"Unsupported TTA mode '{mode}'")
+    if token.startswith("cj"):
+        parts = token.split("_")
+        if parts[0] != "cj":
+            raise ValueError(f"Unsupported TTA token '{token}'")
+
+        brightness = 1.0
+        contrast = 1.0
+        if len(parts) == 1:
+            raise ValueError(
+                "Color jitter TTA must provide at least one factor, e.g. "
+                "'cj_b1.05' or 'cj_b0.95_c1.05'."
+            )
+
+        for part in parts[1:]:
+            if part.startswith("b") and len(part) > 1:
+                brightness = float(part[1:])
+            elif part.startswith("c") and len(part) > 1:
+                contrast = float(part[1:])
+            else:
+                raise ValueError(f"Unsupported color-jitter TTA token part '{part}'")
+
+        return _apply_color_jitter_on_normalized(
+            inputs,
+            brightness=brightness,
+            contrast=contrast,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+        )
+    if token.startswith("gb"):
+        parts = token.split("_")
+        if parts[0] != "gb":
+            raise ValueError(f"Unsupported TTA token '{token}'")
+
+        kernel_size = 3
+        sigma = 0.5
+        for part in parts[1:]:
+            if part.startswith("k") and len(part) > 1:
+                kernel_size = int(part[1:])
+            elif part.startswith("s") and len(part) > 1:
+                sigma = float(part[1:])
+            else:
+                raise ValueError(f"Unsupported gaussian-blur TTA token part '{part}'")
+
+        return _apply_gaussian_blur_on_normalized(
+            inputs,
+            sigma=sigma,
+            kernel_size=kernel_size,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+        )
+
+    raise ValueError(f"Unsupported TTA token '{token}'")
+
+
+def apply_tta(inputs, mode, norm_mean=None, norm_std=None):
+    mode = str(mode).lower().strip()
+    if mode in {"", "orig", "none"}:
+        return inputs
+
+    tokens = [tok.strip() for tok in mode.split("+") if tok.strip()]
+    if not tokens:
+        return inputs
+
+    out = inputs
+    for token in tokens:
+        out = _apply_single_tta_token(
+            out,
+            token,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+        )
+    return out
 
 
 class ModelEMA:

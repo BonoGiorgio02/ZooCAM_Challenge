@@ -409,7 +409,16 @@ def _build_scheduler(optimizer, optim_cfg, train_cfg, nepochs, steps_per_epoch):
     )
 
 
-def _predict_logits_with_tta(model, inputs, metadata, tta_modes, device, amp_enabled):
+def _predict_logits_with_tta(
+    model,
+    inputs,
+    metadata,
+    tta_modes,
+    device,
+    amp_enabled,
+    tta_norm_mean=None,
+    tta_norm_std=None,
+):
     tta_modes = list(tta_modes) if tta_modes is not None else ["orig"]
     if len(tta_modes) == 0:
         tta_modes = ["orig"]
@@ -417,7 +426,12 @@ def _predict_logits_with_tta(model, inputs, metadata, tta_modes, device, amp_ena
     use_amp = bool(amp_enabled and device.type == "cuda")
     logits_sum = None
     for mode in tta_modes:
-        aug_inputs = utils.apply_tta(inputs, mode)
+        aug_inputs = utils.apply_tta(
+            inputs,
+            mode,
+            norm_mean=tta_norm_mean,
+            norm_std=tta_norm_std,
+        )
         amp_ctx = (
             torch.autocast(device_type="cuda", dtype=torch.float16)
             if use_amp
@@ -814,6 +828,9 @@ def test(config):
     if isinstance(tta_modes, str):
         tta_modes = [tta_modes]
 
+    tta_norm_mean = inference_cfg.get("tta_norm_mean", data_config.get("mean", None))
+    tta_norm_std = inference_cfg.get("tta_norm_std", data_config.get("std", None))
+
     tau_grid = inference_cfg.get("logit_adjustment_tau_grid", [0.0])
     if isinstance(tau_grid, (int, float)):
         tau_grid = [float(tau_grid)]
@@ -868,6 +885,8 @@ def test(config):
                 tta_modes=tta_modes,
                 device=device,
                 amp_enabled=amp_enabled,
+                tta_norm_mean=tta_norm_mean,
+                tta_norm_std=tta_norm_std,
             )
             logits = logits - best_tau * log_prior.unsqueeze(0)
             preds = torch.argmax(logits, dim=1).detach().cpu().tolist()
