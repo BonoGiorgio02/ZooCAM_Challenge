@@ -1,57 +1,31 @@
 # coding: utf-8
 
 # Standard imports
-import logging
+import os
 import random
+import logging
 from pathlib import Path
 
 # External imports
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torchvision
+import torch.nn as nn
 import torch.utils.data
-import torchvision.transforms.functional as F
-from sklearn.model_selection import train_test_split
-from torchvision.datasets import ImageFolder
-from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
+from torchvision import transforms
 from torchvision.transforms import v2
+from torchvision.datasets import ImageFolder
+import torchvision.transforms.functional as F
+from torch.utils.data import WeightedRandomSampler
+from torchvision.datasets.folder import IMG_EXTENSIONS, default_loader
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
 
 # Local imports
 from . import analysis
-
-
-_META_EPS = 1.0
-
-
-def _compute_size_metadata(height, width):
-    h = float(height)
-    w = float(width)
-    meta = [
-        np.log1p(h),
-        np.log1p(w),
-        np.log1p(h * w),
-        np.log((w + _META_EPS) / (h + _META_EPS)),
-    ]
-    return torch.tensor(meta, dtype=torch.float32)
-
-
-class MetadataImageFolder(ImageFolder):
-    """ImageFolder variant returning (image, metadata, label)."""
-
-    def __getitem__(self, index):
-        path, target = self.samples[index]
-        sample = self.loader(path)
-
-        width, height = sample.size
-        metadata = _compute_size_metadata(height=height, width=width)
-
-        if self.transform is not None:
-            sample = self.transform(sample)
-        if self.target_transform is not None:
-            target = self.target_transform(target)
-
-        return sample, metadata, target
-
 
 class InferenceImageDataset(torch.utils.data.Dataset):
     """Dataset for unlabeled inference returning filename with optional metadata."""
@@ -89,37 +63,9 @@ class InferenceImageDataset(torch.utils.data.Dataset):
         return img, path.name
 
 
-class EnsureNumChannels(torch.nn.Module):
-    """Ensure CHW tensor has the expected number of channels."""
-
-    def __init__(self, out_channels=3):
-        super().__init__()
-        if out_channels not in (1, 3):
-            raise ValueError("out_channels must be 1 or 3")
-        self.out_channels = out_channels
-
-    def forward(self, x):
-        if x.ndim != 3:
-            raise ValueError(f"Expected CHW tensor, got shape {tuple(x.shape)}")
-
-        c = x.shape[0]
-        if c == self.out_channels:
-            return x
-
-        if self.out_channels == 3:
-            if c == 1:
-                return x.repeat(3, 1, 1)
-            return x[:3]
-
-        if c == 3:
-            return x.mean(dim=0, keepdim=True)
-        return x[:1]
-
-
 class PadToSquare(torch.nn.Module):
     """Pad a CHW image tensor to square using a constant fill color."""
-
-    def __init__(self, fill=(0, 0, 0)):
+    def __init__(self, fill=(255, 255, 255)):
         super().__init__()
         self.fill = fill
 
@@ -140,11 +86,11 @@ class PadToSquare(torch.nn.Module):
             fill=self.fill,
         )
 
-
+    
 def show(imgs):
     if not isinstance(imgs, list):
         imgs = [imgs]
-    _, axs = plt.subplots(ncols=len(imgs), squeeze=False)
+    fig, axs = plt.subplots(ncols=len(imgs), squeeze=False)
     for i, img in enumerate(imgs):
         img = img.detach()
         img = F.to_pil_image(img)
@@ -159,303 +105,288 @@ def show_image(X):
     plt.show()
 
 
-def _resolve_norm_stats(normalize, to_rgb):
-    normalize = str(normalize).lower()
-    if normalize in {"none", "identity"}:
-        return None, None
+def build_transform_blocks(img_size=128, to_rgb=True, pad_fill=255):
+    """
+    Return transform blocks (lists) so you can compose train/val pipelines.
+    """
+    # ImageNet normalization (useful for pretrained backbones)
+    mean = [0.886471]*3 if to_rgb else [0.886471]
+    std  = [0.208829]*3 if to_rgb else [0.208829]
 
-    if normalize == "imagenet":
-        if to_rgb:
-            return [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
-        return [0.5], [0.5]
-
-    raise ValueError("data.normalize must be one of: imagenet, none")
-
-
-def build_transform_blocks(
-    img_size=128,
-    to_rgb=True,
-    pad_fill=0,
-    normalize="imagenet",
-    train_augment=None,
-    keep_aspect_ratio=True,
-    pad_to_square=True,
-):
-    """Return transform blocks (lists) so you can compose train/val pipelines."""
-
-    train_augment = dict(train_augment or {})
-
-    out_channels = 3 if to_rgb else 1
-    mean, std = _resolve_norm_stats(normalize=normalize, to_rgb=to_rgb)
     fill = (pad_fill, pad_fill, pad_fill) if to_rgb else pad_fill
 
+    # Common: convert + enforce channels
     common_pre = [
         v2.ToImage(),
-        EnsureNumChannels(out_channels=out_channels),
+        v2.Grayscale(num_output_channels=3 if to_rgb else 1),
     ]
 
-    resize_pad = []
-    if bool(keep_aspect_ratio) and bool(pad_to_square):
-        resize_pad.append(PadToSquare(fill=fill))
-    resize_pad.append(v2.Resize((img_size, img_size), antialias=True))
+    # Pad to square, then Resize with aspect ratio preserved
+    resize_pad = [
+        PadToSquare(fill=fill),
+        v2.Resize((img_size, img_size), antialias=True),
+    ]
 
-    geo_aug_train = []
-    hflip_p = float(train_augment.get("hflip_p", 0.5))
-    vflip_p = float(train_augment.get("vflip_p", 0.5))
-    if hflip_p > 0:
-        geo_aug_train.append(v2.RandomHorizontalFlip(p=hflip_p))
-    if vflip_p > 0:
-        geo_aug_train.append(v2.RandomVerticalFlip(p=vflip_p))
+    # Geometry augmentation (TRAIN only)
+    geo_aug_train = [
+        v2.RandomHorizontalFlip(p=0.2),
+        v2.RandomVerticalFlip(p=0.1),
+    ]
 
-    affine_p = float(train_augment.get("affine_p", 0.7))
-    rotate_deg = float(train_augment.get("rotate_deg", 180.0))
-    translate = tuple(train_augment.get("translate", [0.05, 0.05]))
-    scale = tuple(train_augment.get("scale", [0.9, 1.1]))
-    shear_deg = float(train_augment.get("shear_deg", 7.0))
-    if affine_p > 0:
-        geo_aug_train.append(
-            v2.RandomApply(
-                [
-                    v2.RandomAffine(
-                        degrees=rotate_deg,
-                        translate=translate,
-                        scale=scale,
-                        shear=shear_deg,
-                        fill=fill,
-                    )
-                ],
-                p=affine_p,
-            )
-        )
+    # Photometric augmentation (TRAIN only)
+    photometric_train = [
+        v2.RandomApply([v2.ColorJitter(brightness=0.2, contrast=0.2)], p=0.1),
+        v2.RandomApply([v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.05),
+    ]
 
-    photometric_train = []
-    brightness = float(train_augment.get("brightness", 0.10))
-    contrast = float(train_augment.get("contrast", 0.10))
-    if brightness > 0 or contrast > 0:
-        photometric_train.append(v2.ColorJitter(brightness=brightness, contrast=contrast))
+    # Final: float + normalize (TRAIN only)
+    to_tensor_norm_train = [
+        v2.ToDtype(torch.float32, scale=True),
+        v2.RandomErasing(p=0.05, scale=(0.02,0.10), value=1.0),
+        v2.Normalize(mean=mean, std=std),
+    ]
 
-    to_tensor_norm = [v2.ToDtype(torch.float32, scale=True)]
-    if mean is not None and std is not None:
-        to_tensor_norm.append(v2.Normalize(mean=mean, std=std))
-
-    tensor_aug_train = []
-    random_erasing_p = float(train_augment.get("random_erasing_p", 0.15))
-    if random_erasing_p > 0:
-        tensor_aug_train.append(v2.RandomErasing(p=random_erasing_p))
+    # Final: float + normalize (VAL only)
+    to_tensor_norm_val = [
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=mean, std=std),
+    ]
 
     return {
         "common_pre": common_pre,
         "resize_pad": resize_pad,
         "geo_aug_train": geo_aug_train,
         "photometric_train": photometric_train,
-        "to_tensor_norm": to_tensor_norm,
-        "tensor_aug_train": tensor_aug_train,
+        "to_tensor_norm_train": to_tensor_norm_train,
+        "to_tensor_norm_val": to_tensor_norm_val,
     }
 
 
-def build_train_val_transforms(
-    img_size=128,
-    to_rgb=True,
-    pad_fill=0,
-    normalize="imagenet",
-    train_augment=None,
-    keep_aspect_ratio=True,
-    pad_to_square=True,
-):
-    blocks = build_transform_blocks(
-        img_size=img_size,
-        to_rgb=to_rgb,
-        pad_fill=pad_fill,
-        normalize=normalize,
-        train_augment=train_augment,
-        keep_aspect_ratio=keep_aspect_ratio,
-        pad_to_square=pad_to_square,
-    )
+
+def build_train_val_transforms(img_size=128, to_rgb=True, pad_fill=255):
+    blocks = build_transform_blocks(img_size=img_size, to_rgb=to_rgb, pad_fill=pad_fill)
 
     train_tf = v2.Compose(
         blocks["common_pre"]
         + blocks["resize_pad"]
         + blocks["geo_aug_train"]
         + blocks["photometric_train"]
-        + blocks["to_tensor_norm"]
-        + blocks["tensor_aug_train"]
+        + blocks["to_tensor_norm_train"]
     )
 
     val_tf = v2.Compose(
         blocks["common_pre"]
         + blocks["resize_pad"]
-        + blocks["to_tensor_norm"]
+        + blocks["to_tensor_norm_val"]
     )
 
     return train_tf, val_tf
 
-
-def _seed_worker(worker_id):
-    worker_seed = torch.initial_seed() % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-
-
-def _build_loader(
-    dataset,
-    batch_size,
-    shuffle,
-    num_workers,
-    pin_memory,
-    *,
-    seed,
-    drop_last=False,
-    sampler=None,
-    persistent_workers=True,
-    prefetch_factor=2,
+def build_tta_transforms(
+    img_size=128,
+    to_rgb=True,
+    pad_fill=255,
+    mean=0.886471,
+    std=0.208829,
 ):
-    loader_kwargs = {
-        "dataset": dataset,
-        "batch_size": batch_size,
-        "shuffle": shuffle if sampler is None else False,
-        "sampler": sampler,
-        "num_workers": num_workers,
-        "pin_memory": pin_memory,
-        "drop_last": drop_last,
+    mean = [mean]*3 if to_rgb else [mean]
+    std = [std]*3 if to_rgb else [std]
+    fill = (pad_fill, pad_fill, pad_fill) if to_rgb else pad_fill
+
+    base = [
+        v2.ToImage(),
+        v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+        PadToSquare(fill=fill),
+        v2.Resize((img_size, img_size), antialias=True),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=mean, std=std),
+    ]
+
+    return {
+        "none": v2.Compose(base),
+        "hflip": v2.Compose([
+            v2.ToImage(),
+            v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+            PadToSquare(fill=fill),
+            v2.Resize((img_size, img_size), antialias=True),
+            v2.RandomHorizontalFlip(p=1.0),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=mean, std=std),
+        ]),
+        "vflip": v2.Compose([
+            v2.ToImage(),
+            v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+            PadToSquare(fill=fill),
+            v2.Resize((img_size, img_size), antialias=True),
+            v2.RandomVerticalFlip(p=1.0),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=mean, std=std),
+        ]),
+        "rot90": v2.Compose([
+            v2.ToImage(),
+            v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+            PadToSquare(fill=fill),
+            v2.Resize((img_size, img_size), antialias=True),
+            v2.RandomRotation(degrees=(90, 90), fill=fill),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=mean, std=std),
+        ]),
+        "rot180": v2.Compose([
+            v2.ToImage(),
+            v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+            PadToSquare(fill=fill),
+            v2.Resize((img_size, img_size), antialias=True),
+            v2.RandomRotation(degrees=(180, 180), fill=fill),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=mean, std=std),
+        ]),
+        "rot270": v2.Compose([
+            v2.ToImage(),
+            v2.Grayscale(num_output_channels=3 if to_rgb else 1),
+            PadToSquare(fill=fill),
+            v2.Resize((img_size, img_size), antialias=True),
+            v2.RandomRotation(degrees=(270, 270), fill=fill),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=mean, std=std),
+        ]),
     }
 
-    if num_workers > 0:
-        generator = torch.Generator()
-        generator.manual_seed(seed)
-        loader_kwargs["worker_init_fn"] = _seed_worker
-        loader_kwargs["generator"] = generator
-        loader_kwargs["persistent_workers"] = persistent_workers
-        if prefetch_factor is not None:
-            loader_kwargs["prefetch_factor"] = prefetch_factor
 
-    return torch.utils.data.DataLoader(**loader_kwargs)
+def build_weighted_sampler_from_subset(train_full, train_indices, alpha=0.5, max_weight=None):
+    labels_full = np.array([y for _, y in train_full.samples])
+    subset_labels = labels_full[train_indices]
 
+    class_counts = np.bincount(subset_labels)
+    class_weights = 1.0 / np.power(class_counts, alpha)
 
-def _compute_balanced_class_weights(labels, num_classes):
-    counts = np.bincount(labels, minlength=num_classes).astype(np.float64)
-    counts = np.clip(counts, a_min=1.0, a_max=None)
-    weights = len(labels) / (num_classes * counts)
-    weights = weights / weights.mean()
-    return weights.astype(np.float32)
+    class_weights = class_weights / class_weights.mean()
 
+    if max_weight is not None:
+        class_weights = np.clip(class_weights, None, max_weight)
 
-def _compute_sampling_class_weights(class_counts, formula):
-    counts = np.clip(np.asarray(class_counts, dtype=np.float64), a_min=1.0, a_max=None)
-    formula_norm = str(formula).lower().replace(" ", "")
+    sample_weights = class_weights[subset_labels]
 
-    if formula_norm in {"balanced", "inverse_freq", "inverse", "1/n", "1/n_c"}:
-        weights = 1.0 / counts
-    elif formula_norm in {
-        "inverse_sqrt",
-        "1/sqrt(class_count)",
-        "1/sqrt(n)",
-        "1/sqrt(n_c)",
-    }:
-        weights = 1.0 / np.sqrt(counts)
-    elif formula_norm in {"uniform", "natural", "none"}:
-        weights = np.ones_like(counts)
-    else:
-        raise ValueError(
-            "Unknown class_weight_formula. Supported values: "
-            "balanced, inverse_sqrt, uniform"
-        )
-
-    return (weights / weights.mean()).astype(np.float64)
+    sampler = WeightedRandomSampler(
+        weights=torch.as_tensor(sample_weights, dtype=torch.double),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+    return sampler
 
 
-def _resolve_to_rgb(data_config):
-    if "grayscale_to_rgb" in data_config:
-        mode = str(data_config.get("grayscale_to_rgb", "repeat_3_channels")).lower()
-        return mode == "repeat_3_channels"
-    return bool(data_config.get("to_rgb", True))
+def build_datasets(data_config):
+    """
+    Build datasets, this is useful because analysis can run right after dataset creation.
+    Returns:
+      train_base: ImageFolder (train, with transform=None by default)
+      test_ds: InferenceImageDataset (test/imgs, returns filename)
+    """
+    
+    logging.info("  - Dataset creation")
+    
+    root_train_dataset = ImageFolder(
+        root=data_config["trainpath"],
+        transform=None,
+    )
+    
+    root_test_dataset = InferenceImageDataset(
+        root=data_config["testpath"],
+        transform=None,
+    )
+    
+    logging.info(f"  - Loaded {len(root_train_dataset)} train samples")
+    logging.info(f"  - Loaded {len(root_test_dataset)} test samples")
+    
+    return root_train_dataset, root_test_dataset
+    
 
-
-def get_dataloaders(data_config, use_cuda, *, build_test=True):
+def get_dataloaders(data_config, use_cuda):
     valid_ratio = data_config.get("valid_ratio", 0.1)
     batch_size = data_config.get("batch_size", 128)
     num_workers = data_config.get("num_workers", 4)
     seed = data_config.get("seed", 0)
-
+    
     img_size = data_config.get("img_size", 128)
-    to_rgb = _resolve_to_rgb(data_config)
-    pad_fill = data_config.get("pad_value", data_config.get("pad_fill", 0))
-    normalize = data_config.get("normalize", "imagenet")
-    keep_aspect_ratio = bool(data_config.get("keep_aspect_ratio", True))
-    pad_to_square = bool(data_config.get("pad_to_square", True))
+    to_rgb = data_config.get("to_rgb", True)
+    pad_fill = data_config.get("pad_fill", 255)
+    
+    sampler_cfg = data_config.get("sampler", {})
+    use_weighted_sampling = sampler_cfg.get("enabled", False)
+    sampler_alpha = sampler_cfg.get("alpha", 0.3)
+    sampler_max_weight = sampler_cfg.get("max_weight", None)
+    
+    # --- Analysis step (one-shot)
+    analysis_cfg = data_config.get("analysis", {})  # optionally nested under data
+    analysis_enabled = analysis_cfg.get("compute_analysis", False)
+    
+    mean = [0.886471]*3 if to_rgb else [0.886471]
+    std  = [0.208829]*3 if to_rgb else [0.208829]
+    
+    if analysis_enabled:
+        # Build base datasets without transforms
+        train_base, test_dataset = build_datasets(data_config)
+        
+        sample_size = analysis_cfg.get("sample_size", None)
+        save_dir = analysis_cfg.get("out_dir", "./analysis")
+        compute_percentiles = analysis_cfg.get("compute_percentiles", True)
 
-    train_augment = data_config.get("train_augment", {})
-    enable_train_aug = bool(data_config.get("enable_train_augment", True))
-    return_metadata = bool(data_config.get("return_metadata", False))
-
-    pin_memory = data_config.get("pin_memory", use_cuda)
-    persistent_workers = data_config.get("persistent_workers", num_workers > 0)
-    prefetch_factor = data_config.get("prefetch_factor", 2)
-    drop_last_train = data_config.get("drop_last_train", False)
-
-    logging.info("  - Dataset creation")
-    train_base = ImageFolder(root=data_config["trainpath"], transform=None)
-    if len(train_base) == 0:
-        raise ValueError(f"Empty train dataset at {data_config['trainpath']}")
-
-    analysis_cfg = data_config.get("analysis", {})
-    if analysis_cfg.get("compute_analysis", False):
-        analysis.analyze_imagefolder(
+        analysis.compute_dataset_mean_std(
             train_base,
-            sample_size=analysis_cfg.get("sample_size", 200000),
+            sample_size=sample_size,
             seed=seed,
-            out_dir=analysis_cfg.get("out_dir", "./analysis"),
-            compute_percentiles=analysis_cfg.get("compute_percentiles", True),
         )
+        # counts_df, report = analysis.analyze_imagefolder(
+        #     train_base,
+        #     sample_size=sample_size,
+        #     seed=seed,
+        #     out_dir=save_dir,
+        # )
     else:
-        logging.info(
-            "  - Dataset analysis disabled (set data.analysis.compute_analysis=true to run it)"
-        )
+        logging.info("  - Dataset analysis disabled (set data.analysis.enabled=true to run it)")
 
-    train_tf, eval_tf = build_train_val_transforms(
+    train_transform, val_transform = build_train_val_transforms(
         img_size=img_size,
         to_rgb=to_rgb,
         pad_fill=pad_fill,
-        normalize=normalize,
-        train_augment=train_augment,
-        keep_aspect_ratio=keep_aspect_ratio,
-        pad_to_square=pad_to_square,
     )
-
-    if not enable_train_aug:
-        train_tf = eval_tf
-
-    dataset_cls = MetadataImageFolder if return_metadata else ImageFolder
-
-    train_full = dataset_cls(root=data_config["trainpath"], transform=train_tf)
-    valid_full = dataset_cls(root=data_config["trainpath"], transform=eval_tf)
-
-    test_dataset = None
-    if build_test:
-        test_dataset = InferenceImageDataset(
-            root=data_config["testpath"],
-            transform=eval_tf,
-            return_metadata=return_metadata,
-        )
-
-    labels = np.fromiter((y for _, y in train_base.samples), dtype=np.int64, count=len(train_base.samples))
+    
+    train_full = ImageFolder(root=data_config["trainpath"], transform=train_transform)
+    val_full = ImageFolder(root=data_config["trainpath"], transform=val_transform)
+    
+    test_dataset = InferenceImageDataset(
+        root=data_config["testpath"],
+        transform=val_transform,
+    )
+    
+    labels = np.array([y for _, y in train_full.samples])
     indices = np.arange(len(labels))
-
+    
     train_indices, valid_indices = train_test_split(
         indices,
         test_size=valid_ratio,
         stratify=labels,
         random_state=seed,
     )
-
+    
     train_dataset = torch.utils.data.Subset(train_full, train_indices)
-    valid_dataset = torch.utils.data.Subset(valid_full, valid_indices)
+    valid_dataset = torch.utils.data.Subset(val_full, valid_indices)
+    
+    train_sampler = None
+    train_shuffle = True
 
-    num_classes = len(train_base.classes)
-    train_labels = labels[train_indices]
-
-    class_counts = np.bincount(train_labels, minlength=num_classes).astype(np.float64)
-    class_priors = class_counts / np.clip(class_counts.sum(), a_min=1.0, a_max=None)
-    class_weights = _compute_balanced_class_weights(train_labels, num_classes)
+    if use_weighted_sampling:
+        train_sampler = build_weighted_sampler_from_subset(
+            train_full=train_full,
+            train_indices=train_indices,
+            alpha=sampler_alpha,
+            max_weight=sampler_max_weight,
+        )
+        train_shuffle = False
+        logging.info(
+            f"  - Using weighted sampler: alpha={sampler_alpha}, max_weight={sampler_max_weight}"
+        )
+    else:
+        logging.info("  - Using standard shuffled sampling")
 
     imbalance_cfg = data_config.get("imbalance", {})
     sampler_mode = str(data_config.get("sampler_mode", "")).lower().strip()
@@ -490,7 +421,8 @@ def get_dataloaders(data_config, use_cuda, *, build_test=True):
     train_loader = _build_loader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=(train_sampler is None),
+        shuffle=train_shuffle,
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         seed=seed,
@@ -513,49 +445,15 @@ def get_dataloaders(data_config, use_cuda, *, build_test=True):
         prefetch_factor=prefetch_factor,
     )
 
-    test_loader = None
-    if test_dataset is not None:
-        test_loader = _build_loader(
-            test_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            seed=seed + 2,
-            drop_last=False,
-            sampler=None,
-            persistent_workers=persistent_workers,
-            prefetch_factor=prefetch_factor,
-        )
-
-    sample_entry = train_full[0]
-    image_tensor = sample_entry[0] if isinstance(sample_entry, (tuple, list)) else sample_entry
-    input_size = tuple(image_tensor.shape)
-
-    if compute_class_weights:
-        train_loader.class_weights = torch.tensor(class_weights, dtype=torch.float32)
-    train_loader.class_counts = torch.tensor(class_counts, dtype=torch.float32)
-    train_loader.class_priors = torch.tensor(class_priors, dtype=torch.float32)
-    train_loader.num_classes = num_classes
-
-    valid_loader.num_classes = num_classes
-    valid_loader.class_priors = train_loader.class_priors
-
-    if test_loader is not None:
-        test_loader.num_classes = num_classes
-
-    if test_dataset is None:
-        logging.info(f"  - Train/Val sizes: {len(train_dataset)}/{len(valid_dataset)}")
-    else:
-        logging.info(
-            f"  - Train/Val/Test sizes: {len(train_dataset)}/{len(valid_dataset)}/{len(test_dataset)}"
-        )
-    logging.info(
-        "  - Input size: %s | Classes: %s | Metadata: %s | Img size: %s",
-        input_size,
-        num_classes,
-        return_metadata,
-        img_size,
+    num_classes = len(train_full.classes)
+    input_size = tuple(train_full[0][0].shape)
+    
+    tta_transforms = build_tta_transforms(
+        img_size=img_size,
+        to_rgb=to_rgb,
+        pad_fill=pad_fill,
+        mean=mean,
+        std=std,
     )
 
-    return train_loader, valid_loader, test_loader, input_size, num_classes
+    return train_loader, valid_loader, test_loader, input_size, num_classes, tta_transforms

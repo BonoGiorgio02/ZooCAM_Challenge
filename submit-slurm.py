@@ -1,3 +1,4 @@
+
 #!/usr/bin/python
 
 import argparse
@@ -5,425 +6,252 @@ import os
 import re
 import shutil
 import subprocess
-import sys
-import tempfile
-import time
+
+WANDB_API_KEY = "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"
+WANDB_MODE = "online"
+
+def _get_run_name_from_config(configpath: str) -> str:
+    try:
+        import yaml
+    except ImportError as e:
+        raise RuntimeError("PyYAML is required on the login node: pip install pyyaml") from e
+
+    with open(configpath, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    model = cfg.get("model", {}).get("class", "model")
+    configname = os.path.splitext(os.path.basename(configpath))[0]
+    return f"{model}_{configname}"
 
 
-DEFAULT_PARTITION = "gpu_prod_long"
-DEFAULT_DURATION = "20:00:00"
+def makejob(commit_id: str, configpath: str, run_root: str, nruns: int, install_torch_pascal: bool, wandb_mode: str,
+    wandb_api_key: str,) -> str:
+    run_name = _get_run_name_from_config(configpath)
 
+    # IMPORTANT:
+    # We use .format() to inject a few values (commit_id, configpath, etc.).
+    # Therefore, every literal { } inside the generated bash/python must be escaped as {{ }}.
+    torch_block = r"""
+echo "Installing PyTorch compatible with Pascal (GTX 1080Ti sm_61)"
+python -m pip uninstall -y torch torchvision torchaudio || true
+python -m pip install --index-url https://download.pytorch.org/whl/cu118 torch==2.1.2 torchvision==0.16.2
+""" if install_torch_pascal else r"""
+echo "Skipping torch override (using project dependencies)"
+"""
 
-def build_sbatch_header(
-    job_name,
-    partition,
-    duration,
-    output_path,
-    error_path,
-    array_size=None,
-    constraint=None,
-    exclusive=True,
-):
-    lines = [
-        "#!/bin/bash",
-        "",
-        f"#SBATCH --job-name={job_name}",
-        "#SBATCH --nodes=1",
-        f"#SBATCH --partition={partition}",
-    ]
-    if constraint:
-        lines.append(f"#SBATCH --constraint={constraint}")
-    if exclusive:
-        lines.append("#SBATCH --exclusive")
-    lines.extend(
-        [
-            f"#SBATCH --time={duration}",
-            f"#SBATCH --output={output_path}",
-            f"#SBATCH --error={error_path}",
-        ]
-    )
-    if array_size is not None:
-        lines.append(f"#SBATCH --array=1-{array_size}")
-    return "\n".join(lines) + "\n\n"
+    return """#!/bin/bash
+#SBATCH --job-name=templatecode
+#SBATCH --nodes=1
+#SBATCH --partition=gpu_prod_long
+#SBATCH --time=24:00:00
+#SBATCH --array=1-{nruns}
+#SBATCH --output={run_root}/slurm_logs/{run_name}_%A_%a.out
+#SBATCH --error={run_root}/slurm_logs/{run_name}_%A_%a.err
 
+set -u
+set -o pipefail
 
-def makejob(commit_id, configpath, nruns, partition, duration, constraint, exclusive):
-    header = build_sbatch_header(
-        job_name="templatecode",
-        partition=partition,
-        duration=duration,
-        output_path="logslurms/slurm-%A_%a.out",
-        error_path="logslurms/slurm-%A_%a.err",
-        array_size=nruns,
-        constraint=constraint,
-        exclusive=exclusive,
-    )
-    return f"""{header}current_dir=$(pwd)
-export PATH=$PATH:~/.local/bin
-
-echo "Session " ${{SLURM_ARRAY_JOB_ID}}_${{SLURM_ARRAY_TASK_ID}}
-echo "Running on " $(hostname)
-
-echo "Copying the source directory and data"
+echo "Session ${{SLURM_ARRAY_JOB_ID}}_${{SLURM_ARRAY_TASK_ID}}"
+echo "Running on $(hostname)"
 date
-mkdir -p "$TMPDIR/code"
-rsync -r --exclude logs --exclude logslurms . "$TMPDIR/code"
 
-echo "Checking out the correct version of the code commit_id {commit_id}"
-cd "$TMPDIR/code"
+current_dir=$(pwd)
+
+RUN_NAME="{run_name}"
+RUN_DIR="{run_root}/${{RUN_NAME}}_${{SLURM_ARRAY_JOB_ID}}_${{SLURM_ARRAY_TASK_ID}}"
+
+echo "Creating run directory: $RUN_DIR"
+mkdir -p "$RUN_DIR"
+mkdir -p "{run_root}/slurm_logs"
+
+echo "Copying source code to scratch (TMPDIR fallback)"
+TMPBASE="${{TMPDIR:-/tmp/$USER/$SLURM_JOB_ID}}"
+mkdir -p "$TMPBASE/code"
+rsync -r --exclude logs --exclude logslurms --exclude runs . "$TMPBASE/code"
+
+cd "$TMPBASE/code"
+echo "Checkout commit {commit_id}"
 git checkout {commit_id}
 
-echo "Setting up the virtual environment"
+echo "Setting up DCE virtual environment"
+
 /opt/dce/dce_venv.sh /mounts/datasets/venvs/torch-2.7.1 $TMPDIR/venv
 source $TMPDIR/venv/bin/activate
 
-# Install the library
-python -m pip install .
+echo "Python version:"
+python --version
 
-echo "Training"
-python -m torchtmpl.main "{configpath}" train
-TRAIN_EXIT_CODE=$?
+echo "Torch version:"
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 
-echo "Retrieving logs from the compute node..."
-mkdir -p "$current_dir/logs"
-if [[ -d logs ]]; then
-    rsync -avz logs/ "$current_dir/logs/"
-    RSYNC_EXIT_CODE=$?
-else
-    echo "No logs/ directory found on compute node."
-    RSYNC_EXIT_CODE=0
-fi
+# install your package in editable mode
+python -m pip install -e .
 
-if [[ $RSYNC_EXIT_CODE != 0 ]]; then
-    exit $RSYNC_EXIT_CODE
-fi
+# alcune dipendenze utili
+python -m pip install wandb pyyaml
 
-exit $TRAIN_EXIT_CODE
-"""
+# ====
+# WANDB SETUP
+# ====
 
+export WANDB_DIR="$RUN_DIR/wandb"
+mkdir -p "$WANDB_DIR"
 
-def make_reserve_job(duration, partition, constraint, exclusive):
-    header = build_sbatch_header(
-        job_name="reserve_node",
-        partition=partition,
-        duration=duration,
-        output_path="logslurms/slurm-%j.out",
-        error_path="logslurms/slurm-%j.err",
-        array_size=None,
-        constraint=constraint,
-        exclusive=exclusive,
-    )
-    return f"""{header}echo "Reserved node:" $(hostname)
-echo "Keeping allocation for {duration}"
-date
-sleep infinity
-"""
+export WANDB_MODE="{wandb_mode}"
 
+export WANDB_API_KEY="{wandb_api_key}"
 
-def submit_job(job_script):
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".sbatch", prefix="tmp-submit-", dir=".", delete=False
-    ) as fp:
-        fp.write(job_script)
-        script_path = fp.name
+echo "WANDB_MODE=$WANDB_MODE"
+echo "WANDB_DIR=$WANDB_DIR"
 
-    try:
-        return subprocess.run(
-            ["sbatch", script_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-    finally:
-        if os.path.exists(script_path):
-            os.remove(script_path)
+# Method 2: Python explicit login
+python3 - <<'PY'
+import os
 
+mode = os.environ.get("WANDB_MODE", "").strip().lower()
+key = os.environ.get("WANDB_API_KEY", "").strip()
 
-def submit_or_raise(job_script):
-    result = submit_job(job_script)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(f"sbatch submission failed: {detail}")
-    submission_line = result.stdout.strip()
-    print(submission_line)
-    return extract_job_id(submission_line)
+print("Detected WANDB_MODE =", mode)
+print("WANDB_API_KEY present =", bool(key))
 
-
-def extract_job_id(sbatch_output):
-    match = re.search(r"Submitted batch job (\d+)", sbatch_output or "")
-    return int(match.group(1)) if match else None
-
-
-def get_job_state(job_id):
-    result = subprocess.run(
-        ["squeue", "-h", "-j", str(job_id), "-o", "%T"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-    state = result.stdout.strip()
-    return state if state else None
-
-
-def wait_for_job_start(job_id, poll_seconds=20):
-    print(f"Waiting for job {job_id} to start...")
-    terminal_states = {
-        "COMPLETED",
-        "FAILED",
-        "CANCELLED",
-        "TIMEOUT",
-        "OUT_OF_MEMORY",
-        "PREEMPTED",
-        "BOOT_FAIL",
-        "NODE_FAIL",
-    }
-    while True:
-        state = get_job_state(job_id)
-        if state is None:
-            print(
-                f"Job {job_id} is no longer in queue. Check details with: "
-                f"sacct -j {job_id} --format=JobID,State,ExitCode"
-            )
-            return
-        print(f"Job {job_id} state: {state}")
-        if state == "RUNNING":
-            return
-        if state in terminal_states:
-            return
-        time.sleep(poll_seconds)
-
-
-def parse_slurm_time_to_seconds(value):
-    token = value.strip().lower()
-    if token in {"infinite", "unlimited"}:
-        return float("inf")
-
-    day_count = 0
-    if "-" in token:
-        day_token, token = token.split("-", 1)
-        day_count = int(day_token)
-
-    parts = token.split(":")
-    if len(parts) == 3:
-        hours, minutes, seconds = map(int, parts)
-    elif len(parts) == 2:
-        hours = 0
-        minutes, seconds = map(int, parts)
-    elif len(parts) == 1:
-        hours = 0
-        minutes = int(parts[0])
-        seconds = 0
-    else:
-        raise ValueError(f"Unsupported SLURM time format: {value}")
-    return day_count * 86400 + hours * 3600 + minutes * 60 + seconds
-
-
-def discover_partitions_for_duration(duration):
-    target_seconds = parse_slurm_time_to_seconds(duration)
-    result = subprocess.run(
-        ["sinfo", "-h", "-o", "%P|%l"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if result.returncode != 0:
-        return []
-
-    partitions = []
-    for line in result.stdout.splitlines():
-        if "|" not in line:
-            continue
-        raw_name, max_time = line.split("|", 1)
-        part_name = raw_name.replace("*", "").strip()
-        if not part_name:
-            continue
-        try:
-            max_seconds = parse_slurm_time_to_seconds(max_time)
-        except ValueError:
-            continue
-        if max_seconds >= target_seconds:
-            partitions.append(part_name)
-
-    # Prioritize partitions that clearly indicate long jobs.
-    return sorted(set(partitions), key=lambda name: (0 if "long" in name else 1, name))
-
-
-def reserve_with_fallback(duration, partition, constraint, exclusive):
-    candidates = []
-    seen = set()
-
-    def add_candidate(part_name, part_constraint):
-        key = (part_name, part_constraint or "")
-        if key in seen:
-            return
-        seen.add(key)
-        candidates.append((part_name, part_constraint))
-
-    add_candidate(partition, constraint)
-    if constraint:
-        add_candidate(partition, None)
-
-    for discovered in discover_partitions_for_duration(duration):
-        if discovered == partition:
-            continue
-        add_candidate(discovered, constraint)
-        if constraint:
-            add_candidate(discovered, None)
-
-    failures = []
-    for part_name, part_constraint in candidates:
-        job_script = make_reserve_job(
-            duration=duration,
-            partition=part_name,
-            constraint=part_constraint,
-            exclusive=exclusive,
-        )
-        result = submit_job(job_script)
-        if result.returncode == 0:
-            submission_line = result.stdout.strip()
-            print(submission_line)
-            job_id = extract_job_id(submission_line)
-            if part_constraint:
-                print(
-                    f"Reservation accepted on partition={part_name} with constraint={part_constraint}"
-                )
-            else:
-                print(f"Reservation accepted on partition={part_name} without constraint")
-            return job_id
-
-        detail = (result.stderr or result.stdout or "").strip()
-        failures.append(
-            f"- partition={part_name}, constraint={part_constraint or 'none'} -> {detail}"
-        )
-
-    raise RuntimeError(
-        "Unable to reserve a node with current settings.\n"
-        + "\n".join(failures)
-        + "\nTry: sinfo -o '%P %l %D %f %t'"
-    )
-
-
-def ensure_clean_git_state():
-    # Ensure all modified files have been staged and committed.
-    unstaged = subprocess.run(
-        ["git", "diff", "--name-only", "--", ".", ":(exclude)job.sbatch"],
-        stdout=subprocess.PIPE,
-        text=True,
-        check=True,
-    ).stdout.splitlines()
-    staged = subprocess.run(
-        ["git", "diff", "--name-only", "--cached", "--", ".", ":(exclude)job.sbatch"],
-        stdout=subprocess.PIPE,
-        text=True,
-        check=True,
-    ).stdout.splitlines()
-
-    modified = [x for x in (unstaged + staged) if x.strip()]
-    if modified:
-        print(
-            "We found modifications either not staged or not committed "
-            f"(excluding job.sbatch): {', '.join(sorted(set(modified)))}"
-        )
+if mode == "online":
+    if not key:
         raise RuntimeError(
-            "You must stage and commit every modification before submission "
+            "WANDB_MODE=online ma WANDB_API_KEY e' vuota. "
+            "Incolla la tua API key nella variabile WANDB_API_KEY in submit-slurm.py"
         )
+    import wandb
+    wandb.login(key=key, relogin=True)
+    print("wandb login OK")
+elif mode == "offline":
+    print("wandb offline mode enabled")
+elif mode == "disabled":
+    os.environ["WANDB_DISABLED"] = "true"
+    print("wandb disabled")
+else:
+    raise RuntimeError("WANDB_MODE deve essere uno tra: online, offline, disabled")
+PY
 
 
-def get_commit_id():
-    return subprocess.check_output(
-        ["git", "log", "--pretty=format:%H", "-n", "1"], text=True
-    ).strip()
+PATCHED_CONFIG="$RUN_DIR/config.yaml"
 
+echo "Patching config (logdir + checkpoint -> RUN_DIR)"
+SRC_CONFIG="{configpath}" DST_CONFIG="$PATCHED_CONFIG" RUN_DIR="$RUN_DIR" python3 - <<'PY'
+import os, yaml
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("config", nargs="?")
-    parser.add_argument("nruns", nargs="?", type=int, default=1)
-    parser.add_argument("--reserve-only", action="store_true")
-    parser.add_argument("--duration", "--time", dest="duration", default=DEFAULT_DURATION)
-    parser.add_argument("--partition", default=DEFAULT_PARTITION)
-    parser.add_argument("--constraint", default=None)
-    parser.add_argument("--no-exclusive", action="store_true")
-    parser.add_argument("--wait-start", action="store_true")
-    parser.add_argument("--poll-seconds", type=int, default=20)
-    return parser.parse_args()
+src = os.environ["SRC_CONFIG"]
+dst = os.environ["DST_CONFIG"]
+run_dir = os.environ["RUN_DIR"]
 
+best_path = os.path.join(run_dir, "best_model.pt")
+last_path = os.path.join(run_dir, "last_model.pt")
 
-def normalize_reserve_only_args(args):
-    # Backward compatibility: submit-slurm.py --reserve-only 20:00:00
-    if args.reserve_only and args.config and args.duration == DEFAULT_DURATION:
-        args.duration = args.config
-        args.config = None
-    if args.reserve_only and args.nruns != 1:
-        raise ValueError("nruns is not used with --reserve-only")
-    return args
+with open(src, "r") as f:
+    cfg = yaml.safe_load(f)
 
+cfg.setdefault("logging", {{}})
+cfg["logging"]["logdir"] = run_dir
+cfg["checkpoint"] = best_path
 
-def main():
-    args = normalize_reserve_only_args(parse_args())
-    exclusive = not args.no_exclusive
-    os.makedirs("logslurms", exist_ok=True)
+cfg.setdefault("checkpointing", {{}})
+cfg["checkpointing"]["dir"] = run_dir
+cfg["checkpointing"]["best_path"] = best_path
+cfg["checkpointing"]["last_path"] = last_path
+cfg["checkpointing"]["save_best"] = True
+cfg["checkpointing"]["save_last"] = True
 
-    if args.reserve_only:
-        job_id = reserve_with_fallback(
-            duration=args.duration,
-            partition=args.partition,
-            constraint=args.constraint if args.constraint else None,
-            exclusive=exclusive,
-        )
-        if job_id is not None:
-            print(
-                f"Track queue: squeue -j {job_id} -o \"%.18i %.9P %.8j %.8T %.10M %.10l %.6D %R\""
-            )
-            print(f"When RUNNING, open shell on reserved node: srun --jobid {job_id} --pty bash")
-            if args.wait_start:
-                wait_for_job_start(job_id, poll_seconds=max(5, args.poll_seconds))
-                print(f"Now attach with: srun --jobid {job_id} --pty bash")
-        return 0
+# Varianti comuni che alcuni trainer usano
+cfg["best_checkpoint"] = best_path
+cfg["last_checkpoint"] = last_path
 
-    if not args.config:
-        raise ValueError(
-            "Missing config file path. Usage: submit-slurm.py <config.yaml> [nruns]"
-        )
-    if not os.path.isfile(args.config):
-        raise FileNotFoundError(
-            f"Config file not found: {args.config}. "
-            "Pass an existing config path (example: configs/my_run.yaml)."
-        )
+with open(dst, "w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
 
-    ensure_clean_git_state()
-    commit_id = get_commit_id()
-    print(f"I will be using the commit id {commit_id}")
+print("Config patched ->", dst)
+print("logdir     ->", cfg["logging"]["logdir"])
+print("checkpoint ->", cfg["checkpoint"])
+print("best_checkpoint->", cfg["best_checkpoint"])
+print("last_checkpoint->", cfg["last_checkpoint"])
+print("checkpointing  ->", cfg["checkpointing"])
+PY
 
-    os.makedirs("configs", exist_ok=True)
-    tmp_configfilepath = tempfile.mkstemp(dir="./configs", suffix="-config.yml")[1]
-    shutil.copy2(args.config, tmp_configfilepath)
-    tmp_config_relpath = os.path.relpath(tmp_configfilepath, start=os.getcwd())
+echo "Starting training"
 
-    job_id = submit_or_raise(
-        makejob(
-            commit_id=commit_id,
-            configpath=tmp_config_relpath,
-            nruns=args.nruns,
-            partition=args.partition,
-            duration=args.duration,
-            constraint=args.constraint if args.constraint else None,
-            exclusive=exclusive,
-        )
+set +e
+python -m torchtmpl.main "$PATCHED_CONFIG" train
+exit_code=$?
+set -e
+
+echo "Training finished with code $exit_code"
+echo "Final content of: $RUN_DIR"
+ls -lah "$RUN_DIR" || true
+exit $exit_code
+""".format(
+        nruns=nruns,
+        run_root=run_root,
+        run_name=run_name,
+        commit_id=commit_id,
+        configpath=configpath,
+        torch_block=torch_block.strip(),
+        wandb_mode=wandb_mode,
+        wandb_api_key=wandb_api_key,
     )
-    if job_id is not None:
-        print(
-            f"Track queue: squeue -j {job_id} -o \"%.18i %.9P %.8j %.8T %.10M %.10l %.6D %R\""
-        )
-        if args.nruns == 1:
-            print(f"Train log (when RUNNING): tail -f logslurms/slurm-{job_id}_1.out")
-        else:
-            print(f"Train logs (when RUNNING): ls logslurms/slurm-{job_id}_*.out")
-        if args.wait_start:
-            wait_for_job_start(job_id, poll_seconds=max(5, args.poll_seconds))
-            if args.nruns == 1:
-                print(f"Now follow logs with: tail -f logslurms/slurm-{job_id}_1.out")
-    return 0
+
+
+def submit_job(job: str, run_root: str) -> None:
+    os.makedirs(os.path.join(run_root, "slurm_logs"), exist_ok=True)
+    with open("job.sbatch", "w") as f:
+        f.write(job)
+    os.system("sbatch job.sbatch")
+
+
+def ensure_git_clean() -> None:
+    dirty = int(
+        subprocess.run(
+            "expr $(git diff --name-only | wc -l) + $(git diff --name-only --cached | wc -l)",
+            shell=True,
+            stdout=subprocess.PIPE,
+        ).stdout.decode()
+    )
+    if dirty > 0:
+        raise RuntimeError("Commit everything before submitting (git status must be clean)")
+
+
+def get_commit_id() -> str:
+    return subprocess.check_output(
+        "git log --pretty=format:'%H' -n 1", shell=True
+    ).decode().strip()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Usage:
+    #   python submit-slurm.py config.yaml
+    #   python submit-slurm.py config.yaml 1
+    #   python submit-slurm.py config.yaml 3
+    #   python submit-slurm.py config.yaml 1 --no-torch-fix
+    if len(sys.argv) not in [2, 3, 4]:
+        print(f"Usage: {sys.argv[0]} config.yaml <nruns|1> [--no-torch-fix]")
+        sys.exit(-1)
+
+    configpath = sys.argv[1]
+    if not os.path.exists(configpath):
+        raise FileNotFoundError(f"Config file {configpath} not found")
+
+    nruns = 1 if len(sys.argv) == 2 else int(sys.argv[2])
+
+    install_torch_pascal = True
+    if len(sys.argv) == 4:
+        if sys.argv[3] == "--no-torch-fix":
+            install_torch_pascal = False
+        else:
+            raise ValueError("Unknown option. Use --no-torch-fix or omit the option.")
+
+    ensure_git_clean()
+    commit_id = get_commit_id()
+    print("Using commit:", commit_id)
+
+    run_root = os.path.join(os.getcwd(), "runs")
+    os.makedirs(run_root, exist_ok=True)
+
+    submit_job(makejob(commit_id, configpath, run_root, nruns, install_torch_pascal, wandb_mode=WANDB_MODE, wandb_api_key=WANDB_API_KEY), run_root)
+

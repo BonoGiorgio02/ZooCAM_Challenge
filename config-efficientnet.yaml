@@ -1,0 +1,68 @@
+data:
+  trainpath: "/mounts/datasets/datasets/2025-ZooCamChallenge/train"
+  testpath: "/mounts/datasets/datasets/2025-ZooCamChallenge/test"
+  batch_size: 64
+  num_workers: 4
+  valid_ratio: 0.1
+  seed: 42
+
+  mean: 0.886471
+  std: 0.208829
+
+  img_size: 224
+  to_rgb: true
+  pad_fill: 255
+
+  analysis:
+    compute_analysis: false
+    out_dir: "./analysis"
+    compute_percentiles: true
+
+  sampler:
+    enabled: true
+    alpha: 0.3
+    max_weight: 5.0
+
+optim:
+  algo: AdamW
+  params:
+    lr: 0.0001
+    weight_decay: 0.01
+
+scheduler:
+  algo: CosineAnnealingLR
+  params:
+    T_max: 7
+    eta_min: 1.0e-6
+
+nepochs: 7
+
+loss: "CrossEntropyLoss"
+
+logging:
+  logdir: "./logs"
+  wandb:
+    project: "ZooCamChallenge"
+    entity: null
+
+model:
+  class: EfficientNetClassifier
+  name: "efficientnet_b3"
+  pretrained: true
+  freeze_backbone: false
+  unfreeze_last_n: 2
+  head_hidden: 512
+  head_dropout: 0.25
+
+train:
+  resume: false
+  checkpoint: ""
+
+test:
+  checkpoint: "./logs/EfficientNetClassifier_1/best_model.pt"
+  use_tta: true
+  tta_names: ["none", "rot90", "rot180", "rot270"]
+  tta_weights: null
+
+output:
+  submission_path: "./submission.csv"

@@ -9,6 +9,7 @@ import os
 import torch
 import torch.nn
 import tqdm
+from sklearn.metrics import f1_score
 
 
 def generate_unique_logpath(logdir, raw_run_name):
@@ -32,7 +33,7 @@ def generate_unique_logpath(logdir, raw_run_name):
 
 class ModelCheckpoint(object):
     """
-    Model checkpoint callback.
+    Early stopping callback that saves a full training checkpoint.
     """
 
     def __init__(
@@ -40,9 +41,13 @@ class ModelCheckpoint(object):
         model: torch.nn.Module,
         savepath,
         min_is_best: bool = True,
+        optimizer=None,
+        scheduler=None,
     ) -> None:
         self.model = model
         self.savepath = savepath
+        self.optimizer = optimizer
+        self.scheduler = scheduler
         self.best_score = None
         if min_is_best:
             self.is_better = self.lower_is_better
@@ -55,19 +60,41 @@ class ModelCheckpoint(object):
     def higher_is_better(self, score):
         return self.best_score is None or score > self.best_score
 
-    def update(self, score):
+    def update(self, score, epoch: int):
+        """
+        Save checkpoint if score improved.
+        """
         if self.is_better(score):
-            torch.save(self.model.state_dict(), self.savepath)
+            ckpt = {
+                "epoch": epoch,
+                "best_score": score,
+                "model": self.model.state_dict(),
+            }
+            if self.optimizer is not None:
+                ckpt["optimizer"] = self.optimizer.state_dict()
+            if self.scheduler is not None:
+                ckpt["scheduler"] = self.scheduler.state_dict()
+
+            torch.save(ckpt, self.savepath)
             self.best_score = score
             return True
         return False
 
 
-def _update_confusion_matrix(confusion, preds, targets, num_classes):
-    valid = (targets >= 0) & (targets < num_classes)
-    idx = num_classes * targets[valid].to(torch.int64) + preds[valid].to(torch.int64)
-    bins = torch.bincount(idx, minlength=num_classes * num_classes)
-    confusion += bins.reshape(num_classes, num_classes)
+def train(model, loader, f_loss, optimizer, device, dynamic_display=True, wandb_log=None):
+    """
+    Train a model for one epoch, iterating over the loader
+    using the f_loss to compute the loss and the optimizer
+    to update the parameters of the model.
+    Arguments :
+    model     -- A torch.nn.Module object
+    loader    -- A torch.utils.data.DataLoader
+    f_loss    -- The loss function, i.e. a loss Module
+    optimizer -- A torch.optim.Optimzer object
+    device    -- A torch.device
+    Returns :
+    The averaged train metrics computed over a sliding window
+    """
 
 
 def macro_f1_from_confusion(confusion):
@@ -202,6 +229,10 @@ def train(
     use_amp = bool(amp_enabled and device.type == "cuda")
     total_loss = 0.0
     num_samples = 0
+    
+    pbar = tqdm.tqdm(enumerate(loader), desc="Train")
+    
+    for i, (inputs, targets) in pbar:
 
     for _, batch in (pbar := tqdm.tqdm(enumerate(loader), total=len(loader))):
         inputs, metadata, targets = unpack_supervised_batch(batch)
@@ -242,7 +273,13 @@ def train(
 
         total_loss += inputs.shape[0] * loss.item()
         num_samples += inputs.shape[0]
-        pbar.set_description(f"Train loss: {total_loss / max(num_samples, 1):.4f}")
+        
+        # pbar.set_description(f"Train loss : {total_loss/num_samples:.2f}")
+        lr = optimizer.param_groups[0]["lr"]
+        pbar.set_postfix(loss=f"{total_loss/num_samples:.4f}", lr=f"{lr:.2e}")
+        
+        if wandb_log is not None and (i % 100) == 0:
+            wandb_log({"train_loss_batch": float(loss.item()), "batch": i})
 
     return total_loss / max(num_samples, 1)
 
@@ -301,5 +338,82 @@ def test(model, loader, f_loss, device):
     """
     Backward-compatible test helper returning only loss.
     """
-    loss, _ = evaluate(model, loader, f_loss, device)
-    return loss
+
+    # We enter eval mode.
+    # This is important for layers such as dropout, batchnorm, ...
+    model.eval()
+
+    total_loss = 0.0
+    num_samples = 0
+
+    all_targets = []
+    all_preds = []
+
+    pbar = tqdm.tqdm(enumerate(loader), total=len(loader), desc="Val")
+
+    with torch.no_grad():
+        for i, (inputs, targets) in pbar:
+            inputs, targets = inputs.to(device), targets.to(device)
+
+            outputs = model(inputs)
+            loss = f_loss(outputs, targets)
+
+            total_loss += inputs.shape[0] * loss.item()
+            num_samples += inputs.shape[0]
+
+            preds = torch.argmax(outputs, dim=1)
+
+            all_targets.extend(targets.cpu().tolist())
+            all_preds.extend(preds.cpu().tolist())
+
+            current_loss = total_loss / num_samples
+            pbar.set_postfix(loss=f"{current_loss:.4f}")
+
+    val_loss = total_loss / num_samples
+    macro_f1 = f1_score(all_targets, all_preds, average="macro")
+
+    return val_loss, macro_f1
+
+
+@torch.no_grad()
+def predict_proba(model, loader, device):
+    model.eval()
+
+    all_probs = []
+
+    pbar = tqdm.tqdm(loader, desc="Predict")
+
+    for batch in pbar:
+        if isinstance(batch, (list, tuple)) and len(batch) == 2:
+            inputs = batch[0]
+        else:
+            inputs = batch
+
+        inputs = inputs.to(device)
+        outputs = model(inputs)
+        probs = torch.softmax(outputs, dim=1)
+        all_probs.append(probs.cpu())
+
+    return torch.cat(all_probs, dim=0)
+
+
+@torch.no_grad()
+def predict_proba_tta(model, loaders, device, weights=None):
+    model.eval()
+
+    if weights is None:
+        weights = [1.0 / len(loaders)] * len(loaders)
+
+    assert len(weights) == len(loaders), "weights and loaders must have same length"
+
+    final_probs = None
+
+    for w, loader in zip(weights, loaders):
+        probs = predict_proba(model, loader, device)
+
+        if final_probs is None:
+            final_probs = w * probs
+        else:
+            final_probs += w * probs
+
+    return final_probs
