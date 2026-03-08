@@ -367,6 +367,7 @@ def train(
     scheduler_step="epoch",
     grad_clip_norm=None,
     ema=None,
+    wandb_log = None
 ):
     """
     Train a model for one epoch.
@@ -379,7 +380,7 @@ def train(
     total_loss = 0.0
     num_samples = 0
 
-    for _, batch in (pbar := tqdm.tqdm(enumerate(loader), total=len(loader))):
+    for i, batch in (pbar := tqdm.tqdm(enumerate(loader), total=len(loader))):
         inputs, metadata, targets = unpack_supervised_batch(batch)
         inputs = inputs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
@@ -419,6 +420,9 @@ def train(
         total_loss += inputs.shape[0] * loss.item()
         num_samples += inputs.shape[0]
         pbar.set_description(f"Train loss: {total_loss / max(num_samples, 1):.4f}")
+
+        if wandb_log is not None and (i % 100) == 0:
+            wandb_log({"train_loss_batch": float(loss.item()), "batch": i})
 
     return total_loss / max(num_samples, 1)
 

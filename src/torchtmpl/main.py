@@ -16,6 +16,7 @@ import torch
 import torchinfo.torchinfo as torchinfo
 import yaml
 from tqdm import tqdm
+import wandb
 
 # Local imports
 from . import data
@@ -513,6 +514,19 @@ def train(config):
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda") if use_cuda else torch.device("cpu")
 
+    wandb_log = None
+    if "wandb" in config.get("logging", {}):
+        wandb_config = config["logging"]["wandb"]
+        wandb.init(
+            project=wandb_config.get("project", "ZooCamChallenge"),
+            entity=wandb_config.get("entity", None),
+            config=config,
+        )
+        wandb_log = wandb.log
+        logging.info(f"Will be recording in wandb run name : {wandb.run.name}")
+    else:
+        wandb_log = None
+
     data_config = config["data"]
     model_config = config["model"]
     optim_config = config["optim"]
@@ -611,6 +625,7 @@ def train(config):
         + " ".join(sys.argv)
         + "\n\n"
         + f" Config : {config} \n\n"
+        + (f" Wandb run name : {wandb.run.name}\n\n" if wandb_log is not None else "")
         + "## Summary of the model architecture\n"
         + f"{summary}\n\n"
         + "## Datasets : \n"
@@ -620,6 +635,8 @@ def train(config):
     with open(logdir / "summary.txt", "w") as f:
         f.write(summary_text)
     logging.info(summary_text)
+    if wandb_log is not None:
+        wandb.log({"summary": summary_text})
 
     selection_metric = train_cfg.get("selection_metric", "val_macro_f1")
     selection_mode = train_cfg.get("selection_mode", "max").lower()
@@ -722,6 +739,7 @@ def train(config):
             scheduler_step=scheduler_step,
             grad_clip_norm=grad_clip_norm,
             ema=ema,
+            wandb_log = wandb_log
         )
 
         eval_model = ema.ema if ema is not None else model
@@ -739,6 +757,13 @@ def train(config):
             "val_loss": val_loss,
             "val_macro_f1": val_macro_f1,
         }
+
+        if wandb_log is not None:
+            logging.info("Logging on wandb")
+            wandb_log(metrics)
+    
+    if wandb_log is not None:
+        wandb.finish()
 
         if scheduler is not None:
             if scheduler_step == "epoch":

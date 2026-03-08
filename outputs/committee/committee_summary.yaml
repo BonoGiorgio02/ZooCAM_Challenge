@@ -1,0 +1,98 @@
+device: cuda
+config_paths:
+- config-resnet.yaml
+- config-efficientnet.yaml
+- config-convnext.yaml
+model_ids:
+- config-resnet:ResNetClassifier
+- config-efficientnet:EfficientNetClassifier
+- config-convnext:ConvNeXtTinyMeta
+single_model_val_macro_f1:
+  config-resnet:ResNetClassifier: 0.7748921513557434
+  config-efficientnet:EfficientNetClassifier: 0.7794991135597229
+  config-convnext:ConvNeXtTinyMeta: 0.7846364974975586
+selected_tau_by_model:
+  config-resnet:ResNetClassifier: 0.05
+  config-efficientnet:EfficientNetClassifier: 0.0
+  config-convnext:ConvNeXtTinyMeta: 0.05
+weights_step: 0.05
+num_combinations: 231
+best_attempt: 29
+best_val_macro_f1: 0.7965447902679443
+best_weights:
+  config-resnet: 0.05
+  config-efficientnet: 0.35
+  config-convnext: 0.6
+top_k:
+- rank: 1
+  attempt: 29
+  val_macro_f1: 0.7965447902679443
+  weights:
+    config-resnet: 0.05
+    config-efficientnet: 0.35
+    config-convnext: 0.6
+- rank: 2
+  attempt: 100
+  val_macro_f1: 0.7964872121810913
+  weights:
+    config-resnet: 0.25
+    config-efficientnet: 0.2
+    config-convnext: 0.55
+- rank: 3
+  attempt: 101
+  val_macro_f1: 0.7956655025482178
+  weights:
+    config-resnet: 0.25
+    config-efficientnet: 0.25
+    config-convnext: 0.5
+- rank: 4
+  attempt: 66
+  val_macro_f1: 0.795524537563324
+  weights:
+    config-resnet: 0.15
+    config-efficientnet: 0.25
+    config-convnext: 0.6
+- rank: 5
+  attempt: 83
+  val_macro_f1: 0.795522928237915
+  weights:
+    config-resnet: 0.2
+    config-efficientnet: 0.2
+    config-convnext: 0.6
+- rank: 6
+  attempt: 82
+  val_macro_f1: 0.7954623103141785
+  weights:
+    config-resnet: 0.2
+    config-efficientnet: 0.15
+    config-convnext: 0.65
+- rank: 7
+  attempt: 85
+  val_macro_f1: 0.7954461574554443
+  weights:
+    config-resnet: 0.2
+    config-efficientnet: 0.3
+    config-convnext: 0.5
+- rank: 8
+  attempt: 50
+  val_macro_f1: 0.7953863143920898
+  weights:
+    config-resnet: 0.1
+    config-efficientnet: 0.4
+    config-convnext: 0.5
+- rank: 9
+  attempt: 102
+  val_macro_f1: 0.7952056527137756
+  weights:
+    config-resnet: 0.25
+    config-efficientnet: 0.3
+    config-convnext: 0.45
+- rank: 10
+  attempt: 69
+  val_macro_f1: 0.795167088508606
+  weights:
+    config-resnet: 0.15
+    config-efficientnet: 0.4
+    config-convnext: 0.45
+grid_csv_path: outputs/committee/committee_grid_search.csv
+submission_path: outputs/committee/submission_committee_best.csv

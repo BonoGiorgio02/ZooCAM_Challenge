@@ -19,6 +19,7 @@ wheels/
 *.egg-info/
 *.egg
 MANIFEST
+job.sbatch
 
 # Environments
 venv/
