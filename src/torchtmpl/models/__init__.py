@@ -9,11 +9,10 @@ from .cnn_models import *
 from .convnext_meta import *
 from .resnet_model import *
 from .ResNet_models import *
-from .ConvNeXt_models import *
 from .EfficientNet_models import *
-from .torchvision_resnet import *
 
 def build_model(cfg, input_size, num_classes):
+    """Build model."""
     model_name = cfg["class"]
     if model_name not in globals():
         raise ValueError(f"Unknown model class '{model_name}'")

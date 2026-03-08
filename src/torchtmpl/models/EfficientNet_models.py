@@ -7,11 +7,13 @@ import torchvision.models as tvm
 
 
 def _freeze_module(m: nn.Module) -> None:
+    """Execute freeze module."""
     for p in m.parameters():
         p.requires_grad = False
 
 
 def _unfreeze_module(m: nn.Module) -> None:
+    """Execute unfreeze module."""
     for p in m.parameters():
         p.requires_grad = True
 
@@ -22,6 +24,7 @@ class MLPHead(nn.Module):
       Linear -> BN -> ReLU -> Dropout -> Linear -> BN -> ReLU -> Dropout -> Linear
     """
     def __init__(self, in_features: int, num_classes: int, hidden: int = 256, dropout: float = 0.2):
+        """Initialize the instance."""
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_features, hidden),
@@ -38,6 +41,7 @@ class MLPHead(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run a forward pass."""
         return self.net(x)
 
 
@@ -50,6 +54,7 @@ class EfficientNetClassifier(nn.Module):
       - optional unfreezing of the last feature blocks
     """
     def __init__(self, cfg: dict, input_size, num_classes: int):
+        """Initialize the instance."""
         super().__init__()
 
         name = cfg.get("name", "efficientnet_b0")   # efficientnet_b0, ..., efficientnet_b7, efficientnet_v2_s, ...
@@ -154,5 +159,6 @@ class EfficientNetClassifier(nn.Module):
         return model, feat_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run a forward pass."""
         feats = self.backbone(x)   # [B, feat_dim]
         return self.head(feats)

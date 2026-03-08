@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 def _adapt_conv2d_in_channels(conv, in_channels, pretrained):
+    """Execute adapt conv2d in channels."""
     if conv.in_channels == in_channels:
         return conv
 
@@ -55,7 +56,9 @@ def _adapt_conv2d_in_channels(conv, in_channels, pretrained):
 
 
 class _TorchvisionConvNeXtTinyFeatures(nn.Module):
+    """Internal class for torchvision conv ne xt tiny features."""
     def __init__(self, pretrained=True, in_channels=3):
+        """Initialize the instance."""
         super().__init__()
 
         weights = tv_models.ConvNeXt_Tiny_Weights.DEFAULT if pretrained else None
@@ -72,6 +75,7 @@ class _TorchvisionConvNeXtTinyFeatures(nn.Module):
         self.num_features = backbone.classifier[-1].in_features
 
     def forward(self, x):
+        """Run a forward pass."""
         x = self.features(x)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
@@ -79,6 +83,7 @@ class _TorchvisionConvNeXtTinyFeatures(nn.Module):
 
 
 def _build_backbone(backbone_name, pretrained, in_channels):
+    """Build backbone."""
     if timm is not None:
         try:
             model = timm.create_model(
@@ -119,6 +124,7 @@ class ConvNeXtTinyMeta(nn.Module):
     expects_metadata = True
 
     def __init__(self, cfg, input_size, num_classes):
+        """Initialize the instance."""
         super().__init__()
         self.cfg = cfg
         self.input_size = input_size
@@ -165,6 +171,7 @@ class ConvNeXtTinyMeta(nn.Module):
             logging.info("ConvNeXtTinyMeta: backbone frozen.")
 
     def _set_backbone_requires_grad(self, trainable):
+        """Set backbone requires grad."""
         for param in self.backbone.parameters():
             param.requires_grad = trainable
         for param in self.meta_mlp.parameters():
@@ -173,10 +180,12 @@ class ConvNeXtTinyMeta(nn.Module):
             param.requires_grad = True
 
     def unfreeze_backbone(self):
+        """Execute unfreeze backbone."""
         self._set_backbone_requires_grad(True)
         logging.info("ConvNeXtTinyMeta: backbone unfrozen.")
 
     def get_param_groups(self, lr_backbone, lr_head, weight_decay):
+        """Return param groups."""
         backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
         head_params = [
             p
@@ -205,6 +214,7 @@ class ConvNeXtTinyMeta(nn.Module):
         return groups
 
     def forward(self, x, meta):
+        """Run a forward pass."""
         if meta is None:
             raise ValueError("ConvNeXtTinyMeta expects metadata tensor with shape [B, 4].")
 

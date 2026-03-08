@@ -11,6 +11,7 @@ class BasicBlock(nn.Module):
     """
 
     def __init__(self, in_channels, out_channels, stride=1):
+        """Initialize the instance."""
         super().__init__()
 
         self.conv1 = nn.Conv2d(
@@ -49,6 +50,7 @@ class BasicBlock(nn.Module):
             self.shortcut = nn.Identity()
 
     def forward(self, x):
+        """Run a forward pass."""
         identity = self.shortcut(x)
 
         out = self.conv1(x)
@@ -72,6 +74,7 @@ class ResNetModel(nn.Module):
     """
 
     def __init__(self, cfg, input_size, num_classes):
+        """Initialize the instance."""
         super().__init__()
         self.cfg = cfg
         self.input_size = input_size
@@ -127,6 +130,7 @@ class ResNetModel(nn.Module):
         )
 
     def _make_stage(self, in_channels, out_channels, num_blocks, first_stride):
+        """Execute make stage."""
         if num_blocks < 1:
             raise ValueError("Each stage must contain at least one BasicBlock.")
 
@@ -136,6 +140,7 @@ class ResNetModel(nn.Module):
         return nn.Sequential(*blocks)
 
     def forward(self, x):
+        """Run a forward pass."""
         x = self.stem(x)
         x = self.stages(x)
         x = self.head(x)

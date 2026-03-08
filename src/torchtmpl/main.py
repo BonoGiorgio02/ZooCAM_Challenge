@@ -26,6 +26,7 @@ from . import utils
 
 
 def set_global_seed(seed):
+    """Set global seed."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -34,6 +35,7 @@ def set_global_seed(seed):
 
 
 def _canonical_loss_name(name):
+    """Execute canonical loss name."""
     lower = str(name).lower()
     if lower in {"cross_entropy", "crossentropyloss", "ce"}:
         return "CrossEntropyLoss"
@@ -41,6 +43,7 @@ def _canonical_loss_name(name):
 
 
 def _canonical_optimizer_name(name):
+    """Execute canonical optimizer name."""
     lower = str(name).lower()
     if lower == "adamw":
         return "AdamW"
@@ -62,6 +65,7 @@ def _prepare_loss_config(
     label_smoothing_override=None,
     use_class_weights_override=None,
 ):
+    """Execute prepare loss config."""
     base_loss_cfg = config["loss"]
     train_cfg = config.get("train", {})
     use_class_weights = bool(train_cfg.get("use_class_weights", False))
@@ -98,12 +102,15 @@ def _prepare_loss_config(
 
 
 def _load_model_weights(model, ckpt_path, device, strict=True):
+    """Load model weights."""
     def _is_state_dict_like(obj):
+        """Execute is state dict like."""
         if not isinstance(obj, dict) or len(obj) == 0:
             return False
         return any(torch.is_tensor(v) for v in obj.values())
 
     def _strip_prefix_if_all_keys_match(state_dict, prefix):
+        """Execute strip prefix if all keys match."""
         if not isinstance(state_dict, dict) or len(state_dict) == 0:
             return state_dict
         if all(isinstance(k, str) and k.startswith(prefix) for k in state_dict.keys()):
@@ -111,6 +118,7 @@ def _load_model_weights(model, ckpt_path, device, strict=True):
         return state_dict
 
     def _extract_state_dict_candidates(raw_state):
+        """Execute extract state dict candidates."""
         queue = [raw_state]
         visited = set()
         candidates = []
@@ -138,6 +146,7 @@ def _load_model_weights(model, ckpt_path, device, strict=True):
         return candidates
 
     def _load_with_key_normalization(state_dict):
+        """Load with key normalization."""
         attempts = []
         for candidate in (
             state_dict,
@@ -243,6 +252,7 @@ def _resume_training_state(
 
 
 def _get_phase_for_epoch(train_cfg, epoch_1based):
+    """Return phase for epoch."""
     phase_items = []
     for key, value in train_cfg.items():
         if not str(key).startswith("phase") or not isinstance(value, dict):
@@ -264,6 +274,7 @@ def _get_phase_for_epoch(train_cfg, epoch_1based):
 
 
 def _resolve_img_size_for_epoch(data_cfg, epoch_1based):
+    """Resolve img size for epoch."""
     default_size = int(data_cfg.get("img_size", 128))
     schedule = data_cfg.get("progressive_resize", None)
     if not schedule:
@@ -281,6 +292,7 @@ def _resolve_img_size_for_epoch(data_cfg, epoch_1based):
 
 
 def _build_epoch_data_config(base_data_cfg, train_cfg, epoch_1based):
+    """Build epoch data config."""
     phase_name, phase_cfg = _get_phase_for_epoch(train_cfg, epoch_1based)
     img_size = _resolve_img_size_for_epoch(base_data_cfg, epoch_1based)
 
@@ -296,6 +308,7 @@ def _build_epoch_data_config(base_data_cfg, train_cfg, epoch_1based):
 
 
 def _infer_sampler_mode(data_cfg):
+    """Execute infer sampler mode."""
     sampler_mode = str(data_cfg.get("sampler_mode", "")).lower().strip()
     if sampler_mode:
         return sampler_mode
@@ -309,6 +322,7 @@ def _infer_sampler_mode(data_cfg):
 
 
 def _infer_class_weight_formula(data_cfg):
+    """Execute infer class weight formula."""
     if "class_weight_formula" in data_cfg:
         return str(data_cfg["class_weight_formula"])
 
@@ -322,6 +336,7 @@ def _infer_class_weight_formula(data_cfg):
 
 
 def _loader_cache_key(data_cfg):
+    """Execute loader cache key."""
     return (
         int(data_cfg.get("img_size", 128)),
         _infer_sampler_mode(data_cfg),
@@ -330,6 +345,7 @@ def _loader_cache_key(data_cfg):
 
 
 def _build_optimizer(model, optim_cfg, train_cfg):
+    """Build optimizer."""
     params = dict(optim_cfg.get("params", {}))
 
     optimizer_name = train_cfg.get("optimizer", optim_cfg.get("algo", "AdamW"))
@@ -363,6 +379,7 @@ def _build_optimizer(model, optim_cfg, train_cfg):
 
 
 def _build_scheduler(optimizer, optim_cfg, train_cfg, nepochs, steps_per_epoch):
+    """Build scheduler."""
     scheduler_name = str(train_cfg.get("scheduler", "")).lower().strip()
     if scheduler_name in {"cosine", "cosineannealing", "cosineannealinglr"}:
         warmup_epochs = int(train_cfg.get("warmup_epochs", 0))
@@ -420,6 +437,7 @@ def _predict_logits_with_tta(
     tta_norm_mean=None,
     tta_norm_std=None,
 ):
+    """Execute predict logits with tta."""
     tta_modes = list(tta_modes) if tta_modes is not None else ["orig"]
     if len(tta_modes) == 0:
         tta_modes = ["orig"]
@@ -454,6 +472,7 @@ def _select_best_tau(
     class_priors,
     amp_enabled,
 ):
+    """Select best tau."""
     if not tau_grid:
         return 0.0, {}
 
@@ -511,6 +530,7 @@ def _select_best_tau(
 
 
 def train(config):
+    """Execute train."""
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda") if use_cuda else torch.device("cpu")
 
@@ -820,6 +840,7 @@ def train(config):
 
 
 def test(config):
+    """Execute test."""
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda") if use_cuda else torch.device("cpu")
 

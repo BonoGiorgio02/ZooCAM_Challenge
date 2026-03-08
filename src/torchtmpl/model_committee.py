@@ -17,6 +17,7 @@ from .main import _load_model_weights
 
 
 def _resolve_device(device_arg):
+    """Resolve device."""
     if device_arg == "cpu":
         return torch.device("cpu")
     if device_arg == "cuda":
@@ -27,12 +28,14 @@ def _resolve_device(device_arg):
 
 
 def _resolve_checkpoint_path(config):
+    """Resolve checkpoint path."""
     if "test" in config and "checkpoint" in config["test"]:
         return config["test"]["checkpoint"]
     return os.path.join(config["logging"]["logdir"], "best_model.pt")
 
 
 def _resolve_inference_settings(config):
+    """Resolve inference settings."""
     data_cfg = config.get("data", {})
     inference_cfg = dict(config.get("inference", {}))
     legacy_test_cfg = config.get("test", {})
@@ -81,6 +84,7 @@ def _predict_logits_with_tta(
     tta_norm_mean=None,
     tta_norm_std=None,
 ):
+    """Execute predict logits with tta."""
     tta_modes = list(tta_modes) if tta_modes is not None else ["orig"]
     if len(tta_modes) == 0:
         tta_modes = ["orig"]
@@ -107,6 +111,7 @@ def _predict_logits_with_tta(
 
 
 def _extract_valid_names(valid_loader):
+    """Execute extract valid names."""
     subset = valid_loader.dataset
     if not hasattr(subset, "indices") or not hasattr(subset, "dataset"):
         raise ValueError("Validation dataset must be a Subset with indices to align committee models.")
@@ -122,6 +127,7 @@ def _extract_valid_names(valid_loader):
 
 
 def _ensure_same_items(reference, candidate, what):
+    """Execute ensure same items."""
     if len(reference) != len(candidate):
         raise ValueError(f"{what} length mismatch: {len(reference)} vs {len(candidate)}")
     for i, (left, right) in enumerate(zip(reference, candidate)):
@@ -133,6 +139,7 @@ def _ensure_same_items(reference, candidate, what):
 
 
 def _select_best_tau_from_logits(logits, targets, num_classes, tau_grid, log_prior):
+    """Select best tau from logits."""
     if not tau_grid:
         return 0.0, {}
 
@@ -155,6 +162,7 @@ def _select_best_tau_from_logits(logits, targets, num_classes, tau_grid, log_pri
 
 
 def _macro_f1_from_logits(logits, targets, num_classes):
+    """Execute macro f1 from logits."""
     preds = torch.argmax(logits, dim=1)
     confusion = torch.zeros((num_classes, num_classes), dtype=torch.long)
     utils._update_confusion_matrix(confusion, preds, targets, num_classes)
@@ -162,6 +170,7 @@ def _macro_f1_from_logits(logits, targets, num_classes):
 
 
 def _run_model_pipeline(config_path, device):
+    """Run model pipeline."""
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
@@ -311,6 +320,7 @@ def _run_model_pipeline(config_path, device):
 
 
 def _generate_simplex_weights(num_models, step):
+    """Execute generate simplex weights."""
     units = int(round(1.0 / step))
     if abs(units * step - 1.0) > 1e-9:
         raise ValueError("weights_step must divide 1.0 exactly (e.g. 0.2, 0.1, 0.05, 0.02)")
@@ -318,6 +328,7 @@ def _generate_simplex_weights(num_models, step):
     all_int_weights = []
 
     def _recurse(prefix, remaining, slots_left):
+        """Execute recurse."""
         if slots_left == 1:
             all_int_weights.append(prefix + [remaining])
             return
@@ -329,6 +340,7 @@ def _generate_simplex_weights(num_models, step):
 
 
 def _write_submission(path, names, labels):
+    """Execute write submission."""
     out_dir = os.path.dirname(path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -341,6 +353,7 @@ def _write_submission(path, names, labels):
 
 
 def run_committee(config_paths, out_dir, submission_name, weights_step, top_k, device_arg):
+    """Run committee."""
     device = _resolve_device(device_arg)
     logging.info("Device: %s", device)
     logging.info("Committee models: %s", ", ".join(config_paths))
@@ -501,6 +514,7 @@ def run_committee(config_paths, out_dir, submission_name, weights_step, top_k, d
 
 
 def _build_arg_parser():
+    """Build arg parser."""
     parser = argparse.ArgumentParser(
         description=(
             "Run an automatic model committee pipeline: per-model val/test inference, "
@@ -548,6 +562,7 @@ def _build_arg_parser():
 
 
 def main():
+    """Run the entrypoint."""
     logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
     parser = _build_arg_parser()
     args = parser.parse_args()

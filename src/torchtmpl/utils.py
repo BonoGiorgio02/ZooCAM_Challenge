@@ -45,6 +45,7 @@ class ModelCheckpoint(object):
         savepath,
         min_is_best: bool = True,
     ) -> None:
+        """Initialize the instance."""
         self.model = model
         self.savepath = savepath
         self.best_score = None
@@ -54,12 +55,15 @@ class ModelCheckpoint(object):
             self.is_better = self.higher_is_better
 
     def lower_is_better(self, score):
+        """Execute lower is better."""
         return self.best_score is None or score < self.best_score
 
     def higher_is_better(self, score):
+        """Execute higher is better."""
         return self.best_score is None or score > self.best_score
 
     def update(self, score):
+        """Execute update."""
         if self.is_better(score):
             torch.save(self.model.state_dict(), self.savepath)
             self.best_score = score
@@ -68,6 +72,7 @@ class ModelCheckpoint(object):
 
 
 def _update_confusion_matrix(confusion, preds, targets, num_classes):
+    """Execute update confusion matrix."""
     valid = (targets >= 0) & (targets < num_classes)
     idx = num_classes * targets[valid].to(torch.int64) + preds[valid].to(torch.int64)
     bins = torch.bincount(idx, minlength=num_classes * num_classes)
@@ -75,6 +80,7 @@ def _update_confusion_matrix(confusion, preds, targets, num_classes):
 
 
 def macro_f1_from_confusion(confusion):
+    """Execute macro f1 from confusion."""
     conf = confusion.to(torch.float32)
     tp = torch.diag(conf)
     fp = conf.sum(dim=0) - tp
@@ -85,6 +91,7 @@ def macro_f1_from_confusion(confusion):
 
 
 def unpack_supervised_batch(batch):
+    """Unpack supervised batch."""
     if not isinstance(batch, (tuple, list)):
         raise ValueError("Expected training/validation batch as tuple/list.")
 
@@ -102,6 +109,7 @@ def unpack_supervised_batch(batch):
 
 
 def unpack_inference_batch(batch):
+    """Unpack inference batch."""
     if not isinstance(batch, (tuple, list)):
         raise ValueError("Expected inference batch as tuple/list.")
 
@@ -119,6 +127,7 @@ def unpack_inference_batch(batch):
 
 
 def model_forward(model, inputs, metadata=None):
+    """Execute model forward."""
     expects_metadata = bool(getattr(model, "expects_metadata", False))
 
     if expects_metadata:
@@ -133,6 +142,7 @@ def model_forward(model, inputs, metadata=None):
 
 
 def _expand_norm_values(values, channels):
+    """Execute expand norm values."""
     if values is None:
         return None
     if isinstance(values, (int, float)):
@@ -155,6 +165,7 @@ def _apply_color_jitter_on_normalized(
     norm_mean=None,
     norm_std=None,
 ):
+    """Execute apply color jitter on normalized."""
     if inputs.ndim != 4:
         raise ValueError(f"Expected BCHW tensor for TTA, got shape {tuple(inputs.shape)}")
 
@@ -183,6 +194,7 @@ def _apply_color_jitter_on_normalized(
 
 
 def _build_gaussian_kernel2d(kernel_size, sigma, device, dtype):
+    """Build gaussian kernel2d."""
     radius = kernel_size // 2
     coords = torch.arange(-radius, radius + 1, device=device, dtype=dtype)
     kernel_1d = torch.exp(-0.5 * (coords / float(sigma)) ** 2)
@@ -199,6 +211,7 @@ def _apply_gaussian_blur_on_normalized(
     norm_mean=None,
     norm_std=None,
 ):
+    """Execute apply gaussian blur on normalized."""
     if inputs.ndim != 4:
         raise ValueError(f"Expected BCHW tensor for TTA, got shape {tuple(inputs.shape)}")
     if kernel_size % 2 == 0 or kernel_size < 3:
@@ -231,6 +244,7 @@ def _apply_gaussian_blur_on_normalized(
 
 
 def _apply_single_tta_token(inputs, token, norm_mean=None, norm_std=None):
+    """Execute apply single tta token."""
     if token in {"orig", "none"}:
         return inputs
     if token == "hflip":
@@ -298,6 +312,7 @@ def _apply_single_tta_token(inputs, token, norm_mean=None, norm_std=None):
 
 
 def apply_tta(inputs, mode, norm_mean=None, norm_std=None):
+    """Execute apply tta."""
     mode = str(mode).lower().strip()
     if mode in {"", "orig", "none"}:
         return inputs
@@ -318,7 +333,9 @@ def apply_tta(inputs, mode, norm_mean=None, norm_std=None):
 
 
 class ModelEMA:
+    """Class for model ema."""
     def __init__(self, model, decay=0.9998):
+        """Initialize the instance."""
         self.decay = float(decay)
         self.ema = copy.deepcopy(model).eval()
         for p in self.ema.parameters():
@@ -326,6 +343,7 @@ class ModelEMA:
 
     @torch.no_grad()
     def update(self, model):
+        """Execute update."""
         ema_state = self.ema.state_dict()
         model_state = model.state_dict()
 
@@ -337,12 +355,14 @@ class ModelEMA:
                 ema_value.copy_(model_value)
 
     def state_dict(self):
+        """Execute state dict."""
         return {
             "decay": self.decay,
             "ema_state_dict": self.ema.state_dict(),
         }
 
     def load_state_dict(self, state):
+        """Load state dict."""
         if state is None:
             return
 

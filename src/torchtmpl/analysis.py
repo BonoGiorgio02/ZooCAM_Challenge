@@ -15,6 +15,7 @@ from torchvision.datasets import ImageFolder
 
 @dataclass
 class DatasetReport:
+    """Class for dataset report."""
     num_images: int
     num_classes: int
     min_w: int

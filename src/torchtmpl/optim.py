@@ -6,6 +6,7 @@ import torch.nn as nn
 
 
 def get_loss(loss_cfg, device=None):
+    """Return loss."""
     if isinstance(loss_cfg, str):
         loss_name = loss_cfg
         params = {}
@@ -26,6 +27,7 @@ def get_loss(loss_cfg, device=None):
 
 
 def get_optimizer(cfg, params):
+    """Return optimizer."""
     algo = cfg["algo"]
     params_dict = dict(cfg.get("params", {}))
 
@@ -35,6 +37,7 @@ def get_optimizer(cfg, params):
 
 
 def get_scheduler(cfg, optimizer, steps_per_epoch=None):
+    """Return scheduler."""
     if cfg is None:
         return None, None, None
 

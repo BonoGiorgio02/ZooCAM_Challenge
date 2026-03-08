@@ -24,6 +24,7 @@ _META_EPS = 1.0
 
 
 def _compute_size_metadata(height, width):
+    """Compute size metadata."""
     h = float(height)
     w = float(width)
     meta = [
@@ -39,6 +40,7 @@ class MetadataImageFolder(ImageFolder):
     """ImageFolder variant returning (image, metadata, label)."""
 
     def __getitem__(self, index):
+        """Return one item by index."""
         path, target = self.samples[index]
         sample = self.loader(path)
 
@@ -57,6 +59,7 @@ class InferenceImageDataset(torch.utils.data.Dataset):
     """Dataset for unlabeled inference returning filename with optional metadata."""
 
     def __init__(self, root, transform=None, return_metadata=False):
+        """Initialize the instance."""
         self.root = Path(root)
         self.transform = transform
         self.return_metadata = bool(return_metadata)
@@ -69,9 +72,11 @@ class InferenceImageDataset(torch.utils.data.Dataset):
             raise ValueError(f"No image found under test path: {self.root}")
 
     def __len__(self):
+        """Return the number of items."""
         return len(self.samples)
 
     def __getitem__(self, idx):
+        """Return one item by index."""
         path = self.samples[idx]
         img = default_loader(str(path))
 
@@ -93,12 +98,14 @@ class EnsureNumChannels(torch.nn.Module):
     """Ensure CHW tensor has the expected number of channels."""
 
     def __init__(self, out_channels=3):
+        """Initialize the instance."""
         super().__init__()
         if out_channels not in (1, 3):
             raise ValueError("out_channels must be 1 or 3")
         self.out_channels = out_channels
 
     def forward(self, x):
+        """Run a forward pass."""
         if x.ndim != 3:
             raise ValueError(f"Expected CHW tensor, got shape {tuple(x.shape)}")
 
@@ -120,10 +127,12 @@ class PadToSquare(torch.nn.Module):
     """Pad a CHW image tensor to square using a constant fill color."""
 
     def __init__(self, fill=(0, 0, 0)):
+        """Initialize the instance."""
         super().__init__()
         self.fill = fill
 
     def forward(self, x):
+        """Run a forward pass."""
         _, h, w = x.shape
         if h == w:
             return x
@@ -142,6 +151,7 @@ class PadToSquare(torch.nn.Module):
 
 
 def show(imgs):
+    """Show show."""
     if not isinstance(imgs, list):
         imgs = [imgs]
     _, axs = plt.subplots(ncols=len(imgs), squeeze=False)
@@ -153,6 +163,7 @@ def show(imgs):
 
 
 def show_image(X):
+    """Show image."""
     num_c = X.shape[0]
     plt.figure()
     plt.imshow(X[0] if num_c == 1 else X.permute(1, 2, 0))
@@ -160,6 +171,7 @@ def show_image(X):
 
 
 def _expand_norm_values(values, *, to_rgb, field_name):
+    """Execute expand norm values."""
     expected_channels = 3 if to_rgb else 1
 
     if np.isscalar(values):
@@ -178,6 +190,7 @@ def _expand_norm_values(values, *, to_rgb, field_name):
 
 
 def _resolve_norm_stats(normalize, to_rgb, norm_mean=None, norm_std=None):
+    """Resolve norm stats."""
     if norm_mean is not None or norm_std is not None:
         if norm_mean is None or norm_std is None:
             raise ValueError("data.mean and data.std must both be set when overriding normalization")
@@ -296,6 +309,7 @@ def build_train_val_transforms(
     keep_aspect_ratio=True,
     pad_to_square=True,
 ):
+    """Build train val transforms."""
     blocks = build_transform_blocks(
         img_size=img_size,
         to_rgb=to_rgb,
@@ -327,6 +341,7 @@ def build_train_val_transforms(
 
 
 def _seed_worker(worker_id):
+    """Execute seed worker."""
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
@@ -345,6 +360,7 @@ def _build_loader(
     persistent_workers=True,
     prefetch_factor=2,
 ):
+    """Build loader."""
     loader_kwargs = {
         "dataset": dataset,
         "batch_size": batch_size,
@@ -368,6 +384,7 @@ def _build_loader(
 
 
 def _compute_balanced_class_weights(labels, num_classes):
+    """Compute balanced class weights."""
     counts = np.bincount(labels, minlength=num_classes).astype(np.float64)
     counts = np.clip(counts, a_min=1.0, a_max=None)
     weights = len(labels) / (num_classes * counts)
@@ -376,6 +393,7 @@ def _compute_balanced_class_weights(labels, num_classes):
 
 
 def _compute_sampling_class_weights(class_counts, formula, *, alpha=None, max_weight=None):
+    """Compute sampling class weights."""
     counts = np.clip(np.asarray(class_counts, dtype=np.float64), a_min=1.0, a_max=None)
     formula_norm = str(formula).lower().replace(" ", "")
 
@@ -406,6 +424,7 @@ def _compute_sampling_class_weights(class_counts, formula, *, alpha=None, max_we
 
 
 def _resolve_to_rgb(data_config):
+    """Resolve to rgb."""
     if "grayscale_to_rgb" in data_config:
         mode = str(data_config.get("grayscale_to_rgb", "repeat_3_channels")).lower()
         return mode == "repeat_3_channels"
@@ -413,6 +432,7 @@ def _resolve_to_rgb(data_config):
 
 
 def get_dataloaders(data_config, use_cuda, *, build_test=True):
+    """Return dataloaders."""
     valid_ratio = data_config.get("valid_ratio", 0.1)
     batch_size = data_config.get("batch_size", 128)
     num_workers = data_config.get("num_workers", 4)

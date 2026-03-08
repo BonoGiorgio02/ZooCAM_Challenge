@@ -8,6 +8,7 @@ from . import build_model
 
 
 def test_linear():
+    """Run linear smoke tests."""
     cfg = {"class": "Linear"}
     input_size = (3, 128, 128)
     batch_size = 16
@@ -22,6 +23,7 @@ def test_linear():
 
 
 def test_cnn():
+    """Run cnn smoke tests."""
     cfg = {"class": "VanillaCNN", "num_layers": 4}
     input_size = (3, 32, 32)
     batch_size = 64
@@ -34,6 +36,7 @@ def test_cnn():
 
 
 def test_resnet():
+    """Run resnet smoke tests."""
     cfg = {
         "class": "ResNetModel",
         "stem_channels": 64,
@@ -53,6 +56,7 @@ def test_resnet():
 
 
 def test_torchvision_resnet():
+    """Run torchvision resnet smoke tests."""
     cfg = {
         "class": "TorchvisionResNet",
         "backbone": "resnet18",
@@ -72,6 +76,7 @@ def test_torchvision_resnet():
 
 
 def test_convnext_tiny_meta():
+    """Run convnext tiny meta smoke tests."""
     cfg = {
         "class": "ConvNeXtTinyMeta",
         "backbone": "convnext_tiny.fb_in22k_ft_in1k",
@@ -94,6 +99,7 @@ def test_convnext_tiny_meta():
 
 
 def test_efficientnet_classifier():
+    """Run efficientnet classifier smoke tests."""
     cfg = {
         "class": "EfficientNetClassifier",
         "name": "efficientnet_b0",
@@ -113,6 +119,7 @@ def test_efficientnet_classifier():
 
 
 def test_convnext_classifier():
+    """Run convnext classifier smoke tests."""
     cfg = {
         "class": "ConvNeXtClassifier",
         "name": "convnext_tiny",
@@ -132,6 +139,7 @@ def test_convnext_classifier():
 
 
 def test_resnet_classifier():
+    """Run resnet classifier smoke tests."""
     cfg = {
         "class": "ResNetClassifier",
         "name": "resnet18",

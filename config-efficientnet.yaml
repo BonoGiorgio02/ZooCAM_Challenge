@@ -67,9 +67,11 @@ test:
 inference:
   tta:
     - orig
-    - rot90
-    - rot180
-    - rot270
+    - hflip
+    - vflip
+    # - rot90
+    # - rot180
+    # - rot270
   tta_norm_mean: [0.886471, 0.886471, 0.886471]
   tta_norm_std: [0.208829, 0.208829, 0.208829]
   logit_adjustment_tau_grid: [0.0]

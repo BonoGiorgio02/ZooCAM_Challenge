@@ -10,6 +10,7 @@ import torch.nn as nn
 
 
 def conv_relu_bn(cin, cout):
+    """Execute conv relu bn."""
     return [
         nn.Conv2d(cin, cout, kernel_size=3, stride=1, padding=1),
         nn.ReLU(),
@@ -18,6 +19,7 @@ def conv_relu_bn(cin, cout):
 
 
 def conv_down(cin, cout):
+    """Execute conv down."""
     return [
         nn.Conv2d(cin, cout, kernel_size=2, stride=2, padding=0),
         nn.ReLU(),
@@ -33,6 +35,7 @@ class VanillaCNN(nn.Module):
         - a global average pooling at the end
     """
     def __init__(self, cfg, input_size, num_classes):
+        """Initialize the instance."""
         super().__init__()
         
         hidden = cfg.get("head_hidden", 256)
@@ -63,6 +66,7 @@ class VanillaCNN(nn.Module):
         self.model = nn.Sequential(*layers)
         
     def forward(self, x):
+        """Run a forward pass."""
         return self.model(x)
 
 # def VanillaCNN(cfg, input_size, num_classes):
