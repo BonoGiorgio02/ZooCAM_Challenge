@@ -1,3 +1,6 @@
+# Lien youtube
+https://www.youtube.com/@GiorgioBono
+
 # Template base code for pytorch
 
 This repository contains a template base code for a complete pytorch pipeline.
