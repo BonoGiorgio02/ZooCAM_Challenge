@@ -4,6 +4,7 @@ This repository contains our solution to the **3-MD-4040 2026 ZooCAM Challenge**
 
 Our team **Accord Italie France** achieved **1st place** on the final leaderboard.
 
+![](assets/figures/header.png)
 ---
 
 # Competition Overview
@@ -21,6 +22,12 @@ The dataset provided for the challenge contained:
 - **1,215,213 images**
 - **~1,093,000 training images**
 - **86 classes**
+
+<p align="center">
+  <img src="assets/figures/1.jpg" />
+  <img src="assets/figures/100.jpg" />
+  <img src="assets/figures/10004.jpg" />
+</p>
 
 The test labels were not available to participants.
 
@@ -271,4 +278,16 @@ This allowed us to:
 - analyze validation performance
 
 Some example training and validation curves are shown below.
+
+## Training Curves
+
+<p align="center">
+  <img src="assets/plots/W&B Chart 13_03_2026, 16_05_52.png" width="33%">
+  <img src="assets/plots/W&B Chart 13_03_2026, 16_06_26.png" width="33%">
+  <img src="assets/plots/W&B Chart 13_03_2026, 16_06_44.png" width="33%">
+</p>
+
+<p align="center">
+  Figure 1: Validation Macro-F1 and loss curves for the main architectures trained during the competition.
+</p>
 
